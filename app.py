@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 
 # 页面基础配置
@@ -29,11 +30,13 @@ if uploaded_file:
     # 清理表头首尾空格
     df.columns = df.columns.str.strip()
 
-    # 2. 表头字段精确匹配（锁定 '产品SKU'）
+    # 2. 表头字段匹配
     date_col = next((c for c in df.columns if c in ['日期', 'Date', 'sales_date']), None)
     sales_col = next((c for c in df.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
+    state_col = next((c for c in df.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
+    city_col = next((c for c in df.columns if c in ['ShipTo City', 'City', '城市']), None)
     
-    # 按照精确优先级查找产品 SKU 列：优先选择 '产品SKU'
+    # 按照优先级匹配产品 SKU 列：锁定 '产品SKU'
     sku_fields_available = []
     for col_name in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID']:
         if col_name in df.columns:
@@ -50,6 +53,8 @@ if uploaded_file:
     # 数据清洗
     df['Clean_Date'] = pd.to_datetime(df[date_col])
     df['Clean_Units'] = pd.to_numeric(df[sales_col], errors='coerce').fillna(0)
+    if state_col:
+        df['Clean_State'] = df[state_col].astype(str).str.strip().str.upper().replace({'NAN': '未知', 'NONE': '未知', '': '未知'})
 
     # 4. 下拉选择具体的产品 SKU
     sku_list = sorted(df[primary_sku_col].dropna().astype(str).unique())
@@ -60,7 +65,6 @@ if uploaded_file:
     sku_mask = df[primary_sku_col].astype(str) == selected_sku
     sku_info = df[sku_mask].iloc[0]
 
-    # 获取对应元数据
     p_sku = sku_info.get('产品SKU', sku_info.get('SKU', '无'))
     p_name = sku_info.get('产品名称', '未填写')
     p_operator = sku_info.get('运营', '未分配')
@@ -176,7 +180,71 @@ if uploaded_file:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # 8. 明细数据表格
+        st.markdown("---")
+
+        # 8. 新增模块：各州销量分布与占比分析
+        st.subheader("🗺️ 各州 (ShipTo State) 销量分布与占比")
+
+        if state_col and 'Clean_State' in sku_df.columns:
+            state_df = sku_df.groupby('Clean_State').agg({'Clean_Units': 'sum'}).reset_index()
+            state_df['Share_Pct'] = (state_df['Clean_Units'] / total_units) * 100
+            state_df = state_df.sort_values(by='Clean_Units', ascending=False)
+
+            col_chart1, col_chart2 = st.columns([3, 2])
+
+            # 左图：TOP 10 州销量条形图
+            with col_chart1:
+                top_10_states = state_df.head(10)
+                fig_state_bar = px.bar(
+                    top_10_states,
+                    x='Clean_Units',
+                    y='Clean_State',
+                    orientation='h',
+                    text='Clean_Units',
+                    title="TOP 10 热门销售州 (件数)",
+                    labels={'Clean_Units': '销量 (件)', 'Clean_State': '州 Code'},
+                    color='Clean_Units',
+                    color_continuous_scale='Blues'
+                )
+                fig_state_bar.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False)
+                fig_state_bar.update_traces(texttemplate='%{text} 件', textposition='outside')
+                st.plotly_chart(fig_state_bar, use_container_width=True)
+
+            # 右图：州销量占比环形图 (TOP 7 + 其他)
+            with col_chart2:
+                top_7_states = state_df.head(7).copy()
+                other_units = state_df.iloc[7:]['Clean_Units'].sum() if len(state_df) > 7 else 0
+                
+                if other_units > 0:
+                    other_row = pd.DataFrame([{'Clean_State': 'Other (其他州)', 'Clean_Units': other_units, 'Share_Pct': (other_units / total_units) * 100}])
+                    pie_data = pd.concat([top_7_states, other_row], ignore_index=True)
+                else:
+                    pie_data = top_7_states
+
+                fig_state_pie = px.pie(
+                    pie_data,
+                    values='Clean_Units',
+                    names='Clean_State',
+                    hole=0.4,
+                    title="各州销量占比构成"
+                )
+                fig_state_pie.update_traces(textinfo='percent+label')
+                st.plotly_chart(fig_state_pie, use_container_width=True)
+
+            # 各州销量明细表
+            with st.expander("📄 查看所有州的销量与占比明细列表"):
+                st.dataframe(
+                    state_df.rename(columns={
+                        'Clean_State': '州 Code (ShipTo State)',
+                        'Clean_Units': '销量 (件)',
+                        'Share_Pct': '占比 (%)'
+                    }).style.format({'占比 (%)': '{:.2f}%', '销量 (件)': '{:,.0f}'}),
+                    use_container_width=True
+                )
+        else:
+            st.info("数据表中未找到 `ShipTo State` 列，无法展示州级别分布。")
+
+        # 9. 每日汇总数据明细
         with st.expander("📄 查看该产品 SKU 每日汇总明细"):
             st.dataframe(
                 daily_summary.rename(columns={
