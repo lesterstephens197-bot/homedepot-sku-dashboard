@@ -51,6 +51,7 @@ if module == "📊 销售与品类管理决策看板":
         category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
         state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
 
+        # 优先选择 SKU 列（根据用户偏好）
         sku_fields_available = [col for col in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if col in df_sales.columns]
 
         if not date_col or not sales_col or not sku_fields_available:
@@ -91,10 +92,6 @@ if module == "📊 销售与品类管理决策看板":
         total_skus = filtered_sales[primary_sku_col].nunique()
         avg_order_value = total_cost / total_units if total_units > 0 else 0
 
-        # 按周折算趋势
-        filtered_sales['Year_Week'] = filtered_sales['Clean_Date'].dt.to_period('W').astype(str)
-        weekly_trend = filtered_sales.groupby('Year_Week').agg({'Clean_Cost': 'sum', 'Clean_Units': 'sum'}).reset_index()
-
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("销售总金额 (Total Cost)", f"${total_cost:,.2f}")
         c2.metric("销售总出货量 (Units)", f"{int(total_units):,} 件")
@@ -104,11 +101,12 @@ if module == "📊 销售与品类管理决策看板":
         st.markdown("---")
 
         # -----------------------------------------------------------------
-        # 2. ABC 帕累托爆款/滞销分析（管理 & 运营重点）
+        # 2. ABC 帕累托爆款/滞销分析（含详细 SKU 列表）
         # -----------------------------------------------------------------
-        st.subheader("🏆 2. 产品结构 ABC 帕累托诊断 (20/80 爆款与滞销预警)")
-        st.caption("A 类：贡献前 80% 销售额的核心核心爆款 | B 类：贡献 80%-95% 的主力款 | C 类：尾部长尾/滞销款")
+        st.subheader("🏆 2. 产品结构 ABC 帕累托诊断 (含详细 SKU 明细列表)")
+        st.caption("A 类：贡献前 80% 销售额的核心爆款 | B 类：贡献 80%-95% 的腰部主力款 | C 类：贡献最后 5% 的尾部/滞销款")
 
+        # 汇总各 SKU 的销售表现
         sku_summary = filtered_sales.groupby(primary_sku_col).agg({
             'Clean_Cost': 'sum',
             'Clean_Units': 'sum',
@@ -136,7 +134,7 @@ if module == "📊 销售与品类管理决策看板":
         abc_counts = sku_summary['ABC_Class'].value_counts()
         abc_costs = sku_summary.groupby('ABC_Class')['Total_Cost'].sum()
 
-        col_abc1, col_abc2 = st.columns(2)
+        col_abc1, col_abc2 = st.columns([1, 1])
         with col_abc1:
             fig_abc = px.pie(
                 sku_summary,
@@ -151,13 +149,74 @@ if module == "📊 销售与品类管理决策看板":
             st.plotly_chart(fig_abc, use_container_width=True)
 
         with col_abc2:
-            st.markdown("### 💡 帕累托品类优化诊断策略")
+            st.markdown("### 💡 帕累托品类优化诊断建议")
             a_count = abc_counts.get('A 类 (核心爆款)', 0)
+            b_count = abc_counts.get('B 类 (腰部主力)', 0)
             c_count = abc_counts.get('C 类 (尾部/滞销)', 0)
             
-            st.success(f"🟢 **A 类核心爆款**: 仅 **{a_count}** 款 SKU 贡献了全盘 80% 的营收！请运营团队重点跟进库存备货，避免 FBT 断货。")
-            st.warning(f"🟡 **B 类腰部潜力**: **{abc_counts.get('B 类 (腰部主力)', 0)}** 款 SKU，可适当增加广告预算提振销量。")
-            st.error(f"🔴 **C 类尾部滞销**: 包含 **{c_count}** 款 SKU，营收贡献极低。建议评估是否下架或打折清仓以降低周转风险。")
+            st.success(f"🟢 **A 类核心爆款 ({a_count} 款 SKU)**：贡献了全盘 **80%** 的营收！建议运营重点监控备货与供应链，防止断货。")
+            st.warning(f"🟡 **B 类腰部潜力 ({b_count} 款 SKU)**：贡献了 **15%** 的营收，可增加广告投放尝试拉升为 A 类。")
+            st.error(f"🔴 **C 类尾部滞销 ({c_count} 款 SKU)**：仅贡献 **5%** 的营收，存在资金挤压风险。建议排查是否需要清仓下架。")
+
+        # -----------------------------------------------------------------
+        # 详细 SKU 列表展示（标签页）
+        # -----------------------------------------------------------------
+        st.markdown("### 📋 各分类 SKU 详细名单与数据明细")
+
+        df_a = sku_summary[sku_summary['ABC_Class'] == 'A 类 (核心爆款)'].copy()
+        df_b = sku_summary[sku_summary['ABC_Class'] == 'B 类 (腰部主力)'].copy()
+        df_c = sku_summary[sku_summary['ABC_Class'] == 'C 类 (尾部/滞销)'].copy()
+
+        tab_a, tab_b, tab_c, tab_all = st.tabs([
+            f"🟢 A 类核心爆款 ({len(df_a)} 款)", 
+            f"🟡 B 类腰部潜力 ({len(df_b)} 款)", 
+            f"🔴 C 类尾部滞销 ({len(df_c)} 款)",
+            f"📊 全量 SKU 排行榜 ({len(sku_summary)} 款)"
+        ])
+
+        def render_sku_table(df_subset):
+            display_df = df_subset.rename(columns={
+                primary_sku_col: '产品 SKU',
+                'Total_Cost': '销售总额 ($)',
+                'Total_Units': '销售总量 (件)',
+                'Cost_Share (%)': '销售额占比 (%)',
+                'Cumulative_Share (%)': '累计占比 (%)',
+                'Active_Days': '有动销天数',
+                'First_Sale': '首次出单日期',
+                'Last_Sale': '最近出单日期'
+            })
+            display_df['首次出单日期'] = display_df['首次出单日期'].dt.strftime('%Y-%m-%d')
+            display_df['最近出单日期'] = display_df['最近出单日期'].dt.strftime('%Y-%m-%d')
+
+            st.dataframe(
+                display_df[[
+                    '产品 SKU', '销售总额 ($)', '销售总量 (件)', '销售额占比 (%)', 
+                    '累计占比 (%)', '有动销天数', '首次出单日期', '最近出单日期'
+                ]].style.format({
+                    '销售总额 ($)': '${:,.2f}',
+                    '销售总量 (件)': '{:,.0f}',
+                    '销售额占比 (%)': '{:.2f}%',
+                    '累计占比 (%)': '{:.2f}%',
+                    '有动销天数': '{:,.0f} 天'
+                }),
+                use_container_width=True
+            )
+
+        with tab_a:
+            st.caption("🟢 **A 类核心爆款明细**：以下产品为店铺主要利润来源，请重点保持库存充足与 Listing 稳定。")
+            render_sku_table(df_a)
+
+        with tab_b:
+            st.caption("🟡 **B 类腰部潜力明细**：具有一定出货量，建议优化 Listing 关键词或增加 SPA 广告测试扩量。")
+            render_sku_table(df_b)
+
+        with tab_c:
+            st.caption("🔴 **C 类尾部滞销明细**：长尾出货或长期无动销款，建议核查库存仓储费，评估促销或清仓。")
+            render_sku_table(df_c)
+
+        with tab_all:
+            st.caption("📊 **全量 SKU 按销售额降序总览**")
+            render_sku_table(sku_summary)
 
         st.markdown("---")
 
@@ -295,7 +354,6 @@ else:
         overall_roas = total_sales / total_spend if total_spend > 0 else 0
         overall_ctr = (total_clicks / total_impressions) * 100 if total_impressions > 0 else 0
         overall_cpc = total_spend / total_clicks if total_clicks > 0 else 0
-        overall_acos = (total_spend / total_sales) * 100 if total_sales > 0 else 0
 
         st.subheader("📌 1. 广告大盘核心指标 (Macro Overview)")
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -374,4 +432,4 @@ else:
                 fig_ctr_roas = px.scatter(oms_summary, x='CTR (%)', y='ROAS', size=spend_col, hover_name=omsid_col, title="OMSID 点击率 (CTR) vs ROAS（气泡大小 = Spend）", labels={'CTR (%)': '点击率 CTR (%)', 'ROAS': 'ROAS'})
                 st.plotly_chart(fig_ctr_roas, use_container_width=True)
 
-            st.dataframe(oms_summary.rename(columns={omsid_col: 'OMS ID', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)', clicks_col: '点击数', impressions_col: '曝光数', 'ROAS': 'ROAS', 'CTR (%)': '点击率 (%)'}).style.format({'广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}', '点击数': '{:,.0f}', '曝光数': '{:,.0f}', 'ROAS': '{:.2f}', '点击率 (%)': '{:.2f}%'}), use_container_width=True)
+            st.dataframe(oms_summary.rename(columns={omsid_col: 'OMS ID', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)', clicks_col: '点击数', impressions_col: '曝光数', 'ROAS': 'ROAS', 'CTR (%)': '点击率 (%)'}).style.format({'广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}', '点击数': '{:,.0f}', '曝光数': '{:,.0f}', 'ROAS': '{:.2f}', 'CTR (%)': '{:.2f}%'}), use_container_width=True)
