@@ -13,9 +13,14 @@ st.set_page_config(
 st.title("📢 Home Depot SPA 广告绩效深度分析看板")
 st.markdown("---")
 
-# 1. 侧边栏：文件上传
+# 1. 侧边栏及主页面顶部：文件上传区
 st.sidebar.header("⚙️ 广告数据文件上传")
-uploaded_file = st.sidebar.file_uploader("上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"])
+uploaded_file = st.sidebar.file_uploader("上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="ad_file_uploader")
+
+# 如果侧边栏未上传，主页面也给出一个明显的上传提示框
+if not uploaded_file:
+    st.info("👋 欢迎使用广告数据分析看板！请在下方或左侧边栏上传您的 Home Depot SPA 广告报表 (CSV/Excel 格式)。")
+    uploaded_file = st.file_uploader("点击或拖拽上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="main_ad_file_uploader")
 
 if uploaded_file:
     try:
@@ -39,16 +44,14 @@ if uploaded_file:
     roas_col = next((c for c in df.columns if c in ['SPA ROAS', 'ROAS']), None)
     omsid_col = next((c for c in df.columns if c in ['Promoted OMSID Number', 'OMSID', 'Promoted OMS ID']), None)
     dept_col = next((c for c in df.columns if c in ['Promoted Dept Name', 'Promoted Dept Number', 'Dept']), None)
-    start_date_col = next((c for c in df.columns if c in ['Schedule Start Date', 'Start Date']), None)
-    end_date_col = next((c for c in df.columns if c in ['Schedule End Date', 'End Date']), None)
 
     if not campaign_col or not spend_col or not sales_col:
-        st.error(f"解析失败！请确保表格包含关键列（Campaign Name, Spend, SPA Sales）。当前表头为: {list(df.columns)}")
+        st.error(f"解析失败！请确保表格包含关键列（Campaign Name, Spend, SPA Sales）。当前识别到的表头为: {list(df.columns)}")
         st.stop()
 
     # 数据清洗与数值类型转换
     for col in [spend_col, sales_col, clicks_col, impressions_col, roas_col]:
-        if col in df.columns:
+        if col and col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('$', '').str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
 
     # 计算全局衍生指标
@@ -78,13 +81,10 @@ if uploaded_file:
     st.sidebar.markdown("### 🔍 分析维度选择")
     view_mode = st.sidebar.radio("选择分析视角", ["🎯 广告活动 (Campaign) 深度分析", "📦 推广产品 (OMSID) 维度", "🏬 部门 (Dept) 维度"])
 
-    # ---------------------------------------------------------
     # 视角 1：Campaign 广告活动分析
-    # ---------------------------------------------------------
     if view_mode == "🎯 广告活动 (Campaign) 深度分析":
         st.subheader("🎯 广告活动 (Campaign) 表现对比与 ROAS 分析")
 
-        # 汇总 Campaign 数据
         camp_summary = df.groupby(campaign_col).agg({
             spend_col: 'sum',
             sales_col: 'sum',
@@ -98,7 +98,6 @@ if uploaded_file:
 
         col_c1, col_c2 = st.columns(2)
 
-        # 花费与销售额柱状图对比
         with col_c1:
             fig_camp_bar = go.Figure()
             fig_camp_bar.add_trace(go.Bar(
@@ -122,7 +121,6 @@ if uploaded_file:
             )
             st.plotly_chart(fig_camp_bar, use_container_width=True)
 
-        # Spend vs ROAS 散点矩阵（诊断图）
         with col_c2:
             fig_scatter = px.scatter(
                 camp_summary,
@@ -159,9 +157,7 @@ if uploaded_file:
             use_container_width=True
         )
 
-    # ---------------------------------------------------------
     # 视角 2：OMSID 产品维度分析
-    # ---------------------------------------------------------
     elif view_mode == "📦 推广产品 (OMSID) 维度":
         st.subheader("📦 推广产品 (OMSID) 广告效果分析")
 
@@ -176,7 +172,6 @@ if uploaded_file:
             oms_summary['ROAS'] = oms_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
             oms_summary = oms_summary.sort_values(by=spend_col, ascending=False)
 
-            # TOP OMSID 花费与 ROAS 展示
             top_10_oms = oms_summary.head(10)
 
             fig_oms = px.bar(
@@ -213,9 +208,7 @@ if uploaded_file:
         else:
             st.warning("数据表中未查找到 `Promoted OMSID Number` 相关列。")
 
-    # ---------------------------------------------------------
     # 视角 3：Dept 部门维度分析
-    # ---------------------------------------------------------
     else:
         st.subheader("🏬 部门/品类 (Dept) 广告效率对比")
 
@@ -254,6 +247,3 @@ if uploaded_file:
             )
         else:
             st.warning("数据表中未查找到 `Promoted Dept Number` 或 `Promoted Dept Name` 相关列。")
-
-else:
-    st.info("👋 请在左侧上传 Home Depot SPA 广告报表（支持 CSV 或 Excel 格式）。")
