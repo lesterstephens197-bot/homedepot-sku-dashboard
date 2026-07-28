@@ -14,15 +14,242 @@ st.set_page_config(
 st.sidebar.title("📌 功能看板导航")
 module = st.sidebar.selectbox(
     "请选择分析模块",
-    ["📊 销售与品类分析看板", "📢 SPA 广告绩效分析看板"]
+    ["📢 SPA 广告绩效诊断与运营看板", "📊 销售与品类分析看板"]
 )
 
 st.sidebar.markdown("---")
 
 # =========================================================================
-# 模块一：销售与品类分析看板 (Sales & Category Dashboard)
+# 模块一：广告绩效诊断与运营看板 (SPA Ad Operations & Diagnostics Dashboard)
 # =========================================================================
-if module == "📊 销售与品类分析看板":
+if module == "📢 SPA 广告绩效诊断与运营看板":
+    st.title("📢 Home Depot SPA 广告绩效诊断与运营决策看板")
+    st.caption("聚焦运营动作：止损排查、高 ROAS 扩量、转化率诊断与预算分配")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 广告数据上传")
+    uploaded_ad_file = st.sidebar.file_uploader("上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="ad_uploader")
+
+    # 主界面上传入口
+    if not uploaded_ad_file:
+        st.info("👋 请在下方或左侧侧边栏上传您的 Home Depot SPA 广告报表 (例如：工作簿6.xlsx)。")
+        uploaded_ad_file = st.file_uploader("点击或拖拽上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="main_ad_uploader")
+
+    if uploaded_ad_file:
+        try:
+            if uploaded_ad_file.name.endswith('.csv'):
+                df_ad = pd.read_csv(uploaded_ad_file)
+            else:
+                df_ad = pd.read_excel(uploaded_ad_file)
+        except Exception as e:
+            st.error(f"读取广告文件失败，请检查文件格式: {e}")
+            st.stop()
+
+        df_ad.columns = df_ad.columns.str.strip()
+
+        # 广告字段自动匹配
+        campaign_col = next((c for c in df_ad.columns if c in ['Campaign Name', 'Campaign']), None)
+        spend_col = next((c for c in df_ad.columns if c in ['Spend', 'Cost', 'Ad Spend']), None)
+        sales_col = next((c for c in df_ad.columns if c in ['SPA Sales', 'Sales', 'Ad Sales']), None)
+        clicks_col = next((c for c in df_ad.columns if c in ['Clicks', 'Click']), None)
+        impressions_col = next((c for c in df_ad.columns if c in ['Impressions', 'Impression']), None)
+        roas_col = next((c for c in df_ad.columns if c in ['SPA ROAS', 'ROAS']), None)
+        omsid_col = next((c for c in df_ad.columns if c in ['Promoted OMSID Number', 'OMSID', 'Promoted OMS ID']), None)
+        dept_col = next((c for c in df_ad.columns if c in ['Promoted Dept Name', 'Promoted Dept Number', 'Dept']), None)
+
+        if not campaign_col or not spend_col or not sales_col:
+            st.error(f"解析失败！请确保广告表包含关键列（Campaign Name, Spend, SPA Sales）。当前识别到的表头为: {list(df_ad.columns)}")
+            st.stop()
+
+        # 数值清洗
+        for col in [spend_col, sales_col, clicks_col, impressions_col, roas_col]:
+            if col and col in df_ad.columns:
+                df_ad[col] = pd.to_numeric(df_ad[col].astype(str).str.replace('$', '').str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
+
+        # 侧边栏运营阈值设置
+        st.sidebar.markdown("---")
+        st.sidebar.header("🎯 2. 运营优化阈值设置")
+        target_roas = st.sidebar.number_input("目标 ROAS (Target ROAS)", min_value=0.1, value=2.5, step=0.5)
+        waste_spend_threshold = st.sidebar.number_input("零转化报警 Spend 阈值 ($)", min_value=1.0, value=30.0, step=10.0)
+
+        # 全局 KPI 计算
+        total_spend = df_ad[spend_col].sum() if spend_col else 0
+        total_sales = df_ad[sales_col].sum() if sales_col else 0
+        total_clicks = df_ad[clicks_col].sum() if clicks_col else 0
+        total_impressions = df_ad[impressions_col].sum() if impressions_col else 0
+
+        overall_roas = total_sales / total_spend if total_spend > 0 else 0
+        overall_ctr = (total_clicks / total_impressions) * 100 if total_impressions > 0 else 0
+        overall_cpc = total_spend / total_clicks if total_clicks > 0 else 0
+        overall_acos = (total_spend / total_sales) * 100 if total_sales > 0 else 0
+
+        # KPI 卡片展示
+        st.subheader("📌 1. 广告大盘核心指标 (Macro Overview)")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("总广告花费 (Spend)", f"${total_spend:,.2f}")
+        c2.metric("广告销售额 (SPA Sales)", f"${total_sales:,.2f}")
+        
+        roas_delta = overall_roas - target_roas
+        c3.metric("整体 ROAS", f"{overall_roas:.2f}", delta=f"{roas_delta:+.2f} vs 目标", delta_color="normal" if roas_delta >= 0 else "inverse")
+        c4.metric("总点击量 / 平均 CPC", f"{int(total_clicks):,} 次", delta=f"${overall_cpc:.2f}/点击", delta_color="off")
+        c5.metric("总曝光量 / CTR", f"{int(total_impressions):,} 次", delta=f"{overall_ctr:.2f}% CTR", delta_color="off")
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 运营诊断核心区：止损与提效建议
+        # -----------------------------------------------------------------
+        st.subheader("🚨 2. 运营调优诊断中心 (Actionable Insights)")
+        
+        # 1. 零转化浪费广告 (Wasted Spend)
+        wasted_df = df_ad[(df_ad[spend_col] >= waste_spend_threshold) & (df_ad[sales_col] == 0)]
+        total_wasted_spend = wasted_df[spend_col].sum()
+
+        # 2. 低 ROAS 高 Spend 出血点
+        bleed_df = df_ad[(df_ad[spend_col] >= waste_spend_threshold) & (df_ad[sales_col] > 0) & (df_ad[roas_col] < (target_roas * 0.6))]
+
+        # 3. 高 ROAS 低 Spend 扩量潜力点
+        potential_df = df_ad[(df_ad[roas_col] >= target_roas) & (df_ad[spend_col] < (total_spend / max(len(df_ad), 1)))]
+
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            st.error(f"🔻 **无效花费资金浪费**: `${total_wasted_spend:,.2f}`")
+            st.caption(f"存在 **{len(wasted_df)}** 个项目 Spend ≥ ${waste_spend_threshold} 且出单数为 0。建议立即降低出价或暂停！")
+        
+        with d2:
+            st.warning(f"⚠️ **低效出血点广告**: **{len(bleed_df)}** 项")
+            st.caption(f"Spend ≥ ${waste_spend_threshold} 且 ROAS 远低于目标（<{target_roas * 0.6:.2f}）。建议否定不相关词或否定否定匹配。")
+            
+        with d3:
+            st.success(f"🚀 **高 ROAS 扩量机会**: **{len(potential_df)}** 项")
+            st.caption(f"ROAS 达标（≥ {target_roas}）但预算占比偏低。建议增加 Daily Budget 或提高竞价以获取更多曝光！")
+
+        # 标签页细分排查
+        tab1, tab2, tab3 = st.tabs(["🔥 重点排查：无转化浪费项", "⚠️ 低效出血点列表", "🚀 扩量提额潜力项"])
+        
+        with tab1:
+            if not wasted_df.empty:
+                st.dataframe(
+                    wasted_df[[campaign_col, omsid_col, spend_col, clicks_col, impressions_col]].sort_values(by=spend_col, ascending=False).style.format({
+                        spend_col: '${:,.2f}', clicks_col: '{:,.0f}', impressions_col: '{:,.0f}'
+                    }), use_container_width=True
+                )
+            else:
+                st.info("🎉 优秀！暂未发现满足该阈值的纯浪费广告项目。")
+
+        with tab2:
+            if not bleed_df.empty:
+                st.dataframe(
+                    bleed_df[[campaign_col, omsid_col, spend_col, sales_col, roas_col, clicks_col]].sort_values(by=spend_col, ascending=False).style.format({
+                        spend_col: '${:,.2f}', sales_col: '${:,.2f}', roas_col: '{:.2f}', clicks_col: '{:,.0f}'
+                    }), use_container_width=True
+                )
+            else:
+                st.info("暂未发现低效出血点广告。")
+
+        with tab3:
+            if not potential_df.empty:
+                st.dataframe(
+                    potential_df[[campaign_col, omsid_col, spend_col, sales_col, roas_col]].sort_values(by=roas_col, ascending=False).style.format({
+                        spend_col: '${:,.2f}', sales_col: '${:,.2f}', roas_col: '{:.2f}'
+                    }), use_container_width=True
+                )
+            else:
+                st.info("暂未识别到显著偏离预算的潜力广告。")
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 诊断矩阵：Campaign 4 象限分析
+        # -----------------------------------------------------------------
+        st.subheader("🧩 3. Campaign 广告活动四象限矩阵 (Strategy Matrix)")
+        
+        camp_summary = df_ad.groupby(campaign_col).agg({
+            spend_col: 'sum', sales_col: 'sum',
+            clicks_col: 'sum' if clicks_col else 'count',
+            impressions_col: 'sum' if impressions_col else 'count'
+        }).reset_index()
+
+        camp_summary['ROAS'] = camp_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
+        avg_camp_spend = camp_summary[spend_col].median()
+
+        fig_quadrant = px.scatter(
+            camp_summary,
+            x=spend_col,
+            y='ROAS',
+            size=sales_col,
+            hover_name=campaign_col,
+            color='ROAS',
+            color_continuous_scale='RdYlGn',
+            title="Campaign Spend vs ROAS 四象限诊断（气泡大小 = 销售额）",
+            labels={spend_col: '广告花费 Spend ($)', 'ROAS': 'ROAS'}
+        )
+
+        # 增加象限分割辅助线
+        fig_quadrant.add_hline(y=target_roas, line_dash="dash", line_color="red", annotation_text=f"目标 ROAS ({target_roas})")
+        fig_quadrant.add_vline(x=avg_camp_spend, line_dash="dash", line_color="blue", annotation_text=f"中位数 Spend (${avg_camp_spend:.1f})")
+
+        st.plotly_chart(fig_quadrant, use_container_width=True)
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # OMSID (产品维度) 表现与 PDP 转化率排查
+        # -----------------------------------------------------------------
+        st.subheader("📦 4. 推广产品 (OMSID) 流量与转化诊断")
+        
+        if omsid_col:
+            oms_summary = df_ad.groupby(omsid_col).agg({
+                spend_col: 'sum', sales_col: 'sum',
+                clicks_col: 'sum' if clicks_col else 'count',
+                impressions_col: 'sum' if impressions_col else 'count'
+            }).reset_index()
+
+            oms_summary['ROAS'] = oms_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
+            oms_summary['CTR (%)'] = oms_summary.apply(lambda row: (row[clicks_col] / row[impressions_col]) * 100 if row[impressions_col] > 0 else 0, axis=1)
+            oms_summary = oms_summary.sort_values(by=spend_col, ascending=False)
+
+            col_o1, col_o2 = st.columns(2)
+
+            with col_o1:
+                fig_oms_bar = px.bar(
+                    oms_summary.head(10),
+                    x=omsid_col,
+                    y=[spend_col, sales_col],
+                    barmode='group',
+                    title="TOP 10 花费 OMSID 的 Spend 与 Sales 对比",
+                    labels={'value': '金额 ($)', omsid_col: 'OMS ID'}
+                )
+                st.plotly_chart(fig_oms_bar, use_container_width=True)
+
+            with col_o2:
+                fig_ctr_roas = px.scatter(
+                    oms_summary,
+                    x='CTR (%)',
+                    y='ROAS',
+                    size=spend_col,
+                    hover_name=omsid_col,
+                    title="OMSID 的点击率 (CTR) vs ROAS（气泡大小 = Spend）",
+                    labels={'CTR (%)': '点击率 CTR (%)', 'ROAS': 'ROAS'}
+                )
+                st.plotly_chart(fig_ctr_roas, use_container_width=True)
+
+            st.markdown("### 📋 所有 OMSID 广告投放绩效总表")
+            st.dataframe(
+                oms_summary.rename(columns={
+                    omsid_col: 'OMS ID', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)',
+                    clicks_col: '点击数', impressions_col: '曝光数', 'ROAS': 'ROAS', 'CTR (%)': '点击率 (%)'
+                }).style.format({
+                    '广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}',
+                    '点击数': '{:,.0f}', '曝光数': '{:,.0f}', 'ROAS': '{:.2f}', '点击率 (%)': '{:.2f}%'
+                }), use_container_width=True
+            )
+
+
+# =========================================================================
+# 模块二：销售与品类分析看板 (Sales & Category Dashboard)
+# =========================================================================
+else:
     st.title("📊 Home Depot 销售与品类深度分析看板")
     st.markdown("---")
 
@@ -43,11 +270,10 @@ if module == "📊 销售与品类分析看板":
 
         df_sales.columns = df_sales.columns.str.strip()
 
-        # 表头字段匹配
         date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
         sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
-        cost_col = next((c for c in df.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
-        category_col = next((c for c in df.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
+        cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
+        category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
         state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
 
         sku_fields_available = [col for col in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if col in df_sales.columns]
@@ -56,7 +282,6 @@ if module == "📊 销售与品类分析看板":
             st.error(f"解析失败！未能在表格中识别到必需列（日期、销量或产品SKU列）。当前识别到的表头列为: {list(df_sales.columns)}")
             st.stop()
 
-        # 数据清洗
         df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
         df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
         df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
@@ -90,7 +315,6 @@ if module == "📊 销售与品类分析看板":
 
             if not sku_df.empty:
                 sku_info = sku_df.iloc[0]
-                p_sku = sku_info.get('产品SKU', sku_info.get('SKU', '无'))
                 p_name = sku_info.get('产品名称', '未填写')
                 p_operator = sku_info.get('运营', '未分配')
 
@@ -183,137 +407,3 @@ if module == "📊 销售与品类分析看板":
             fig_overall.add_trace(go.Scatter(x=daily_overall['Clean_Date'], y=daily_overall['Clean_Cost'], name='每日 Total Cost ($)', yaxis='y2', line=dict(color='#1E40AF', width=2)))
             fig_overall.update_layout(title="全大盘每日销量与 Total Cost 趋势图", hovermode="x unified", xaxis_title="日期", yaxis=dict(title="销量 (件)"), yaxis2=dict(title="Total Cost ($)", overlaying='y', side='right'))
             st.plotly_chart(fig_overall, use_container_width=True)
-
-
-# =========================================================================
-# 模块二：广告绩效分析看板 (SPA Ad Dashboard)
-# =========================================================================
-else:
-    st.title("📢 Home Depot SPA 广告绩效深度分析看板")
-    st.markdown("---")
-
-    st.sidebar.header("⚙️ 广告数据设置")
-    uploaded_ad_file = st.sidebar.file_uploader("上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="ad_uploader")
-
-    # 主界面上传入口
-    if not uploaded_ad_file:
-        st.info("👋 请在下方或左侧侧边栏上传您的 Home Depot SPA 广告报表 (例如：工作簿6.xlsx)。")
-        uploaded_ad_file = st.file_uploader("点击或拖拽上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="main_ad_uploader")
-
-    if uploaded_ad_file:
-        try:
-            if uploaded_ad_file.name.endswith('.csv'):
-                df_ad = pd.read_csv(uploaded_ad_file)
-            else:
-                df_ad = pd.read_excel(uploaded_ad_file)
-        except Exception as e:
-            st.error(f"读取广告文件失败，请检查文件格式: {e}")
-            st.stop()
-
-        df_ad.columns = df_ad.columns.str.strip()
-
-        # 广告字段匹配
-        campaign_col = next((c for c in df_ad.columns if c in ['Campaign Name', 'Campaign']), None)
-        spend_col = next((c for c in df_ad.columns if c in ['Spend', 'Cost', 'Ad Spend']), None)
-        sales_col = next((c for c in df_ad.columns if c in ['SPA Sales', 'Sales', 'Ad Sales']), None)
-        clicks_col = next((c for c in df_ad.columns if c in ['Clicks', 'Click']), None)
-        impressions_col = next((c for c in df_ad.columns if c in ['Impressions', 'Impression']), None)
-        roas_col = next((c for c in df_ad.columns if c in ['SPA ROAS', 'ROAS']), None)
-        omsid_col = next((c for c in df_ad.columns if c in ['Promoted OMSID Number', 'OMSID', 'Promoted OMS ID']), None)
-        dept_col = next((c for c in df_ad.columns if c in ['Promoted Dept Name', 'Promoted Dept Number', 'Dept']), None)
-
-        if not campaign_col or not spend_col or not sales_col:
-            st.error(f"解析失败！请确保广告表包含关键列（Campaign Name, Spend, SPA Sales）。当前识别到的表头为: {list(df_ad.columns)}")
-            st.stop()
-
-        # 数据清洗
-        for col in [spend_col, sales_col, clicks_col, impressions_col, roas_col]:
-            if col and col in df_ad.columns:
-                df_ad[col] = pd.to_numeric(df_ad[col].astype(str).str.replace('$', '').str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
-
-        total_spend = df_ad[spend_col].sum() if spend_col else 0
-        total_sales = df_ad[sales_col].sum() if sales_col else 0
-        total_clicks = df_ad[clicks_col].sum() if clicks_col else 0
-        total_impressions = df_ad[impressions_col].sum() if impressions_col else 0
-
-        overall_roas = total_sales / total_spend if total_spend > 0 else 0
-        overall_ctr = (total_clicks / total_impressions) * 100 if total_impressions > 0 else 0
-        overall_cpc = total_spend / total_clicks if total_clicks > 0 else 0
-        overall_acos = (total_spend / total_sales) * 100 if total_sales > 0 else 0
-
-        # KPI 卡片
-        st.subheader("📌 广告整体表现概览 (Global Performance)")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("总广告花费 (Spend)", f"${total_spend:,.2f}")
-        c2.metric("广告销售额 (SPA Sales)", f"${total_sales:,.2f}")
-        c3.metric("整体 ROAS", f"{overall_roas:.2f}", delta=f"ACOS: {overall_acos:.1f}%", delta_color="inverse")
-        c4.metric("总点击量 / 平均 CPC", f"{int(total_clicks):,} 次", delta=f"${overall_cpc:.2f}/点击")
-        c5.metric("总曝光量 / CTR", f"{int(total_impressions):,} 次", delta=f"{overall_ctr:.2f}% CTR")
-
-        st.markdown("---")
-
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🔍 广告分析维度选择")
-        ad_view_mode = st.sidebar.radio("选择广告分析视角", ["🎯 广告活动 (Campaign) 深度分析", "📦 推广产品 (OMSID) 维度", "🏬 部门 (Dept) 维度"])
-
-        # 视角 1: Campaign
-        if ad_view_mode == "🎯 广告活动 (Campaign) 深度分析":
-            st.subheader("🎯 广告活动 (Campaign) 表现对比与 ROAS 分析")
-            camp_summary = df_ad.groupby(campaign_col).agg({
-                spend_col: 'sum', sales_col: 'sum',
-                clicks_col: 'sum' if clicks_col else 'count',
-                impressions_col: 'sum' if impressions_col else 'count'
-            }).reset_index()
-
-            camp_summary['ROAS'] = camp_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
-            camp_summary['CPC'] = camp_summary.apply(lambda row: row[spend_col] / row[clicks_col] if row[clicks_col] > 0 else 0, axis=1)
-            camp_summary = camp_summary.sort_values(by=spend_col, ascending=False)
-
-            col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                fig_camp_bar = go.Figure()
-                fig_camp_bar.add_trace(go.Bar(x=camp_summary[campaign_col], y=camp_summary[spend_col], name='广告花费 ($)', marker_color='#F59E0B'))
-                fig_camp_bar.add_trace(go.Bar(x=camp_summary[campaign_col], y=camp_summary[sales_col], name='广告销售额 ($)', marker_color='#10B981'))
-                fig_camp_bar.update_layout(title="各 Campaign 花费 vs 销售额", barmode='group', xaxis_title="Campaign 名称", yaxis_title="金额 ($)")
-                st.plotly_chart(fig_camp_bar, use_container_width=True)
-
-            with col_c2:
-                fig_scatter = px.scatter(
-                    camp_summary, x=spend_col, y='ROAS', size=sales_col, hover_name=campaign_col, color='ROAS',
-                    color_continuous_scale='RdYlGn', title="Campaign 花费 vs ROAS 散点诊断图"
-                )
-                fig_scatter.add_hline(y=overall_roas, line_dash="dash", line_color="gray", annotation_text="全盘平均 ROAS")
-                st.plotly_chart(fig_scatter, use_container_width=True)
-
-            st.markdown("### 📋 Campaign 详细数据与效率排行榜")
-            st.dataframe(camp_summary.rename(columns={campaign_col: 'Campaign 名称', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)', clicks_col: '点击数', impressions_col: '曝光数', 'ROAS': 'ROAS', 'CPC': '平均 CPC ($)'}).style.format({'广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}', '点击数': '{:,.0f}', '曝光数': '{:,.0f}', 'ROAS': '{:.2f}', '平均 CPC ($)': '${:.2f}'}), use_container_width=True)
-
-        # 视角 2: OMSID
-        elif ad_view_mode == "📦 推广产品 (OMSID) 维度":
-            st.subheader("📦 推广产品 (OMSID) 广告效果分析")
-            if omsid_col:
-                oms_summary = df_ad.groupby(omsid_col).agg({spend_col: 'sum', sales_col: 'sum', clicks_col: 'sum' if clicks_col else 'count', impressions_col: 'sum' if impressions_col else 'count'}).reset_index()
-                oms_summary['ROAS'] = oms_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
-                oms_summary = oms_summary.sort_values(by=spend_col, ascending=False)
-
-                top_10_oms = oms_summary.head(10)
-                fig_oms = px.bar(top_10_oms, x=omsid_col, y=spend_col, color='ROAS', text='ROAS', title="TOP 10 广告花费 OMSID 及 ROAS 表现", color_continuous_scale='Viridis')
-                fig_oms.update_traces(texttemplate='ROAS: %{text:.2f}', textposition='outside')
-                st.plotly_chart(fig_oms, use_container_width=True)
-
-                st.markdown("### 📋 所有 OMSID 广告投放明细")
-                st.dataframe(oms_summary.rename(columns={omsid_col: 'OMS ID', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)', clicks_col: '点击数', impressions_col: '曝光数', 'ROAS': 'ROAS'}).style.format({'广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}', '点击数': '{:,.0f}', '曝光数': '{:,.0f}', 'ROAS': '{:.2f}'}), use_container_width=True)
-
-        # 视角 3: Dept
-        else:
-            st.subheader("🏬 部门/品类 (Dept) 广告效率对比")
-            if dept_col:
-                dept_summary = df_ad.groupby(dept_col).agg({spend_col: 'sum', sales_col: 'sum', clicks_col: 'sum' if clicks_col else 'count'}).reset_index()
-                dept_summary['ROAS'] = dept_summary.apply(lambda row: row[sales_col] / row[spend_col] if row[spend_col] > 0 else 0, axis=1)
-                dept_summary = dept_summary.sort_values(by=sales_col, ascending=False)
-
-                fig_dept_pie = px.pie(dept_summary, values=spend_col, names=dept_col, title="各部门/品类广告花费占比", hole=0.4)
-                fig_dept_pie.update_traces(textinfo='percent+label')
-                st.plotly_chart(fig_dept_pie, use_container_width=True)
-
-                st.dataframe(dept_summary.rename(columns={dept_col: '部门/品类 Dept', spend_col: '广告花费 ($)', sales_col: '广告销售额 ($)', 'ROAS': 'ROAS'}).style.format({'广告花费 ($)': '${:,.2f}', '广告销售额 ($)': '${:,.2f}', 'ROAS': '{:.2f}'}), use_container_width=True)
