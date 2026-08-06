@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import calendar
 
 # 页面基础配置
 st.set_page_config(
@@ -18,7 +19,7 @@ module = st.sidebar.radio(
     "请选择分析模块",
     [
         "📊 销售与品类管理决策看板", 
-        "🗓️ 月度环比与多维度对比看板",  # 🆕 新增月度对比模块
+        "🗓️ 月度环比与多维度对比看板",
         "📢 SPA 广告绩效诊断与运营看板",
         "🎯 下月销售目标与 SKU 销量拆解看板"
     ]
@@ -51,7 +52,6 @@ if module == "📊 销售与品类管理决策看板":
 
         df_sales.columns = df_sales.columns.str.strip()
 
-        # 表头自动匹配
         date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
         sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
         cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
@@ -64,7 +64,6 @@ if module == "📊 销售与品类管理决策看板":
             st.error(f"解析失败！未能在表格中识别到必需列（日期、销量或产品SKU列）。当前识别到的表头列为: {list(df_sales.columns)}")
             st.stop()
 
-        # 数据清洗
         df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
         df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
         df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
@@ -74,7 +73,6 @@ if module == "📊 销售与品类管理决策看板":
 
         primary_sku_col = sku_fields_available[0]
 
-        # 时间筛选
         min_d = df_sales['Clean_Date'].min().date()
         max_d = df_sales['Clean_Date'].max().date()
 
@@ -88,7 +86,6 @@ if module == "📊 销售与品类管理决策看板":
         time_mask = (df_sales['Clean_Date'].dt.date >= start_date) & (df_sales['Clean_Date'].dt.date <= end_date)
         filtered_sales = df_sales[time_mask]
 
-        # 1. 管理层高阶 KPI 概览
         st.subheader("📌 1. 渠道总体经营成果 (Executive Performance)")
         total_units = filtered_sales['Clean_Units'].sum()
         total_cost = filtered_sales['Clean_Cost'].sum()
@@ -103,10 +100,7 @@ if module == "📊 销售与品类管理决策看板":
 
         st.markdown("---")
 
-        # 2. ABC 帕累托诊断与 SKU 动销效率全景表
         st.subheader("🏆 2. 产品结构 ABC 帕累托诊断与 SKU 动销效率全景表")
-        st.caption("A 类：贡献前 80% 销售额的核心爆款 | B 类：贡献 80%-95% 的腰部主力款 | C 类：贡献最后 5% 的尾部/滞销款")
-
         active_sales = filtered_sales[filtered_sales['Clean_Units'] > 0]
 
         sku_summary = filtered_sales.groupby(primary_sku_col).agg({
@@ -163,11 +157,6 @@ if module == "📊 销售与品类管理决策看板":
         df_b = sku_summary[sku_summary['ABC_Class'] == 'B 类 (腰部主力)'].copy()
         df_c = sku_summary[sku_summary['ABC_Class'] == 'C 类 (尾部/滞销)'].copy()
 
-        tab_a, tab_b, tab_c, tab_all = st.tabs([
-            f"🟢 A 类核心爆款 ({len(df_a)} 款)", f"🟡 B 类腰部潜力 ({len(df_b)} 款)", 
-            f"🔴 C 类尾部滞销 ({len(df_c)} 款)", f"📊 全量 SKU 动销效率排行榜 ({len(sku_summary)} 款)"
-        ])
-
         def render_sku_table(df_subset):
             display_df = df_subset.rename(columns={
                 primary_sku_col: '产品 SKU', 'Clean_Cost': '销售总额 ($)', 'Clean_Units': '销售总量 (件)',
@@ -188,74 +177,18 @@ if module == "📊 销售与品类管理决策看板":
                 }), use_container_width=True
             )
 
+        tab_a, tab_b, tab_c, tab_all = st.tabs([f"🟢 A 类 ({len(df_a)})", f"🟡 B 类 ({len(df_b)})", f"🔴 C 类 ({len(df_c)})", f"📊 全量 ({len(sku_summary)})"])
         with tab_a: render_sku_table(df_a)
         with tab_b: render_sku_table(df_b)
         with tab_c: render_sku_table(df_c)
         with tab_all: render_sku_table(sku_summary)
 
-        st.markdown("---")
-
-        # 3. 细分视角分析
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🔍 3. 运营分析视角")
-        view_mode = st.sidebar.radio("选择细分视角", ["📦 单产品 SKU 动销深度分析", "🗺️ 全美物流仓储与地理分布", "🏷️ 品类占比与结构分析"])
-
-        if view_mode == "📦 单产品 SKU 动销深度分析":
-            st.subheader("📦 单产品 SKU 动销效率与日均走势")
-            selected_sku = st.sidebar.selectbox(f"选择 {primary_sku_col}", sku_summary[primary_sku_col].unique())
-            sku_df = filtered_sales[filtered_sales[primary_sku_col].astype(str) == str(selected_sku)].sort_values('Clean_Date')
-
-            if not sku_df.empty:
-                total_sku_units = sku_df['Clean_Units'].sum()
-                total_sku_cost = sku_df['Clean_Cost'].sum()
-                daily_summary = sku_df.groupby('Clean_Date').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
-                
-                total_range_days = (end_date - start_date).days + 1
-                active_days = len(daily_summary[daily_summary['Clean_Units'] > 0])
-                overall_avg = total_sku_units / total_range_days if total_range_days > 0 else 0
-                active_avg = total_sku_units / active_days if active_days > 0 else 0
-                active_rate = (active_days / total_range_days) * 100 if total_range_days > 0 else 0
-
-                s1, s2, s3, s4 = st.columns(4)
-                s1.metric("区间总销量", f"{int(total_sku_units):,} 件")
-                s2.metric("区间总金额", f"${total_sku_cost:,.2f}")
-                s3.metric("动销率", f"{active_rate:.1f}%")
-                s4.metric("动销日均销量", f"{active_avg:.1f} 件/天", delta=f"自然日均: {overall_avg:.1f}")
-
-                fig_sku_trend = go.Figure()
-                fig_sku_trend.add_trace(go.Bar(x=daily_summary['Clean_Date'], y=daily_summary['Clean_Units'], name='销量 (件)', marker_color='#3B82F6'))
-                fig_sku_trend.add_trace(go.Scatter(x=daily_summary['Clean_Date'], y=daily_summary['Clean_Cost'], name='金额 ($)', yaxis='y2', line=dict(color='#10B981', width=2.5)))
-                fig_sku_trend.update_layout(title=f"SKU: {selected_sku} - 每日销量与金额趋势", hovermode="x unified", yaxis=dict(title="销量 (件)"), yaxis2=dict(title="金额 ($)", overlaying='y', side='right'))
-                st.plotly_chart(fig_sku_trend, use_container_width=True)
-
-        elif view_mode == "🗺️ 全美物流仓储与地理分布":
-            st.subheader("🗺️ 全美各州销量热力分布")
-            if state_col and 'Clean_State' in filtered_sales.columns:
-                state_df = filtered_sales.groupby('Clean_State').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
-                state_df['Share_Pct'] = (state_df['Clean_Units'] / total_units) * 100 if total_units > 0 else 0
-                state_df = state_df.sort_values(by='Clean_Units', ascending=False)
-
-                m1, m2 = st.columns([2, 1])
-                with m1:
-                    fig_map = px.choropleth(state_df, locations='Clean_State', locationmode="USA-states", color='Clean_Units', scope="usa", color_continuous_scale="Viridis", title="美国各州出货量热力图")
-                    st.plotly_chart(fig_map, use_container_width=True)
-                with m2:
-                    st.markdown("### 🏆 Top 10 销量集中州")
-                    st.dataframe(state_df.head(10).rename(columns={'Clean_State': '州', 'Clean_Units': '销量', 'Clean_Cost': '销售额', 'Share_Pct': '占比 (%)'}), use_container_width=True)
-
-        else:
-            st.subheader("🏷️ 产品品类 (Category) 销售结构分析")
-            cat_df = filtered_sales.groupby('Clean_Category').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum', primary_sku_col: 'nunique'}).reset_index().sort_values(by='Clean_Cost', ascending=False)
-            fig_cat = px.bar(cat_df, x='Clean_Category', y='Clean_Cost', text='Clean_Cost', color='Clean_Units', title="各品类销售额与出货件数表现")
-            fig_cat.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
-            st.plotly_chart(fig_cat, use_container_width=True)
-
 # =========================================================================
-# 模块二：月度环比与多维度对比看板 (🆕 Monthly Comparison Dashboard)
+# 模块二：月度环比与多维度对比看板 (含日均销量对比)
 # =========================================================================
 elif module == "🗓️ 月度环比与多维度对比看板":
     st.title("🗓️ 月度环比与多维度对比分析看板")
-    st.caption("聚焦月度业绩演变：月度大盘趋势、MoM 环比分析、双月 SKU 增减对比与品类结构动态")
+    st.caption("聚焦月度业绩演变：月度大盘趋势、日均销量 (Velocity) 动销速率对比、双月 SKU 增减与品类结构")
     st.markdown("---")
 
     st.sidebar.header("⚙️ 1. 销售数据上传")
@@ -276,7 +209,6 @@ elif module == "🗓️ 月度环比与多维度对比看板":
         sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
         cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
         category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
-        state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
         sku_col = next((c for c in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if c in df_sales.columns), None)
 
         if not date_col or not sales_col or not sku_col:
@@ -295,132 +227,157 @@ elif module == "🗓️ 月度环比与多维度对比看板":
             st.warning("数据表中未发现有效的时间月份记录。")
             st.stop()
 
-        # -----------------------------------------------------------------
-        # 1. 整体月度走势图表
-        # -----------------------------------------------------------------
-        st.subheader("📈 1. 整体月度销售额与出货量趋势")
-        monthly_summary = df_sales.groupby('Year_Month').agg({
-            'Clean_Cost': 'sum',
-            'Clean_Units': 'sum',
-            sku_col: 'nunique'
-        }).reset_index().rename(columns={sku_col: 'Active_SKUs'})
+        # 计算每月自然天数与实际有销售天数
+        def get_month_days(ym_str):
+            y, m = map(int, ym_str.split('-'))
+            return calendar.monthrange(y, m)[1]
 
-        monthly_summary['ASP'] = monthly_summary['Clean_Cost'] / monthly_summary['Clean_Units']
+        # -----------------------------------------------------------------
+        # 1. 大盘月度总出货与【日均销量】趋势对比
+        # -----------------------------------------------------------------
+        st.subheader("📈 1. 整体月度【日均销量 (Units/Day)】与销售额趋势")
+
+        monthly_summary = df_sales.groupby('Year_Month').agg(
+            Clean_Cost=('Clean_Cost', 'sum'),
+            Clean_Units=('Clean_Units', 'sum'),
+            Active_Days=('Clean_Date', 'nunique'),
+            Active_SKUs=(sku_col, 'nunique')
+        ).reset_index()
+
+        monthly_summary['Calendar_Days'] = monthly_summary['Year_Month'].apply(get_month_days)
+        monthly_summary['Daily_Avg_Units (Calendar)'] = monthly_summary['Clean_Units'] / monthly_summary['Calendar_Days']
+        monthly_summary['Daily_Avg_Units (Active)'] = monthly_summary['Clean_Units'] / monthly_summary['Active_Days']
+        monthly_summary['Daily_Avg_Cost'] = monthly_summary['Clean_Cost'] / monthly_summary['Calendar_Days']
+
+        monthly_summary['Units_Daily_MoM (%)'] = monthly_summary['Daily_Avg_Units (Calendar)'].pct_change() * 100
         monthly_summary['Cost_MoM (%)'] = monthly_summary['Clean_Cost'].pct_change() * 100
-        monthly_summary['Units_MoM (%)'] = monthly_summary['Clean_Units'].pct_change() * 100
 
-        fig_m_trend = go.Figure()
-        fig_m_trend.add_trace(go.Bar(x=monthly_summary['Year_Month'], y=monthly_summary['Clean_Units'], name='月度销量 (件)', marker_color='#3B82F6'))
-        fig_m_trend.add_trace(go.Scatter(x=monthly_summary['Year_Month'], y=monthly_summary['Clean_Cost'], name='月度销售额 ($)', yaxis='y2', line=dict(color='#10B981', width=3)))
+        fig_m_daily = go.Figure()
+        fig_m_daily.add_trace(go.Bar(x=monthly_summary['Year_Month'], y=monthly_summary['Daily_Avg_Units (Calendar)'], name='自然日均销量 (件/天)', marker_color='#3B82F6'))
+        fig_m_daily.add_trace(go.Scatter(x=monthly_summary['Year_Month'], y=monthly_summary['Daily_Avg_Cost'], name='自然日均销售额 ($/天)', yaxis='y2', line=dict(color='#10B981', width=3)))
 
-        fig_m_trend.update_layout(
-            title="月度销售额 (Total Cost) 与出货量 (Units) 演变图",
+        fig_m_daily.update_layout(
+            title="月度日均出货速率 (Daily Sales Velocity) 演变图",
             hovermode="x unified",
-            yaxis=dict(title="销量 (件)"),
-            yaxis2=dict(title="销售额 ($)", overlaying='y', side='right')
+            yaxis=dict(title="日均销量 (件/天)"),
+            yaxis2=dict(title="日均销售额 ($/天)", overlaying='y', side='right')
         )
-        st.plotly_chart(fig_m_trend, use_container_width=True)
+        st.plotly_chart(fig_m_daily, use_container_width=True)
 
-        st.markdown("### 📋 月度经营绩效汇总表")
+        st.markdown("### 📋 月度经营与日均出货速率汇总表")
         st.dataframe(
             monthly_summary.rename(columns={
-                'Year_Month': '月份', 'Clean_Cost': '月销售额 ($)', 'Clean_Units': '月出货量 (件)',
-                'Active_SKUs': '动销 SKU 数', 'ASP': '件单价 ($)',
-                'Cost_MoM (%)': '销售额环比 MoM (%)', 'Units_MoM (%)': '销量环比 MoM (%)'
+                'Year_Month': '月份', 'Clean_Cost': '月销售额 ($)', 'Clean_Units': '月总出货量 (件)',
+                'Calendar_Days': '当月天数', 'Daily_Avg_Units (Calendar)': '自然日均销量 (件/天)',
+                'Daily_Avg_Units (Active)': '实际动销日均 (件/天)', 'Daily_Avg_Cost': '自然日均销售额 ($/天)',
+                'Units_Daily_MoM (%)': '日均销量环比 MoM (%)'
             }).style.format({
-                '月销售额 ($)': '${:,.2f}', '月出货量 (件)': '{:,.0f}', '动销 SKU 数': '{:,.0f}',
-                '件单价 ($)': '${:.2f}', '销售额环比 MoM (%)': '{:+.2f}%', '销量环比 MoM (%)': '{:+.2f}%'
+                '月销售额 ($)': '${:,.2f}', '月总出货量 (件)': '{:,.0f}', '自然日均销量 (件/天)': '{:,.1f} 件/天',
+                '实际动销日均 (件/天)': '{:,.1f} 件/天', '自然日均销售额 ($/天)': '${:,.2f}/天', '日均销量环比 MoM (%)': '{:+.2f}%'
             }), use_container_width=True
         )
 
         st.markdown("---")
 
         # -----------------------------------------------------------------
-        # 2. 两个月份深度对比诊断
+        # 2. 双月日均销量 (Sales Velocity) 深度对比
         # -----------------------------------------------------------------
-        st.subheader("🔍 2. 任意双月深度对比诊断 (Month vs Month)")
+        st.subheader("🔍 2. 任意双月【日均销量 (Units/Day)】对比与 SKU 速率诊断")
         
         c_m1, c_m2 = st.columns(2)
-        with c_m1:
-            month_a = st.selectbox("选择基准月份 (Month A)", available_months, index=0)
-        with c_m2:
+        with c_m1: month_a = st.selectbox("选择基准月份 (Month A)", available_months, index=0)
+        with c_m2: 
             default_idx_b = len(available_months) - 1 if len(available_months) > 1 else 0
             month_b = st.selectbox("选择对比月份 (Month B)", available_months, index=default_idx_b)
+
+        days_a = get_month_days(month_a)
+        days_b = get_month_days(month_b)
 
         df_mA = df_sales[df_sales['Year_Month'] == month_a]
         df_mB = df_sales[df_sales['Year_Month'] == month_b]
 
-        cost_A = df_mA['Clean_Cost'].sum()
-        cost_B = df_mB['Clean_Cost'].sum()
-        units_A = df_mA['Clean_Units'].sum()
-        units_B = df_mB['Clean_Units'].sum()
+        daily_units_A = df_mA['Clean_Units'].sum() / days_a if days_a > 0 else 0
+        daily_units_B = df_mB['Clean_Units'].sum() / days_b if days_b > 0 else 0
+        diff_daily_units = daily_units_B - daily_units_A
+        pct_daily_units = (diff_daily_units / daily_units_A * 100) if daily_units_A > 0 else 0
 
-        diff_cost = cost_B - cost_A
-        diff_units = units_B - units_A
-        pct_cost = (diff_cost / cost_A * 100) if cost_A > 0 else 0
-        pct_units = (diff_units / units_A * 100) if units_A > 0 else 0
+        st.markdown(f"#### 📌 【{month_b}】 vs 【{month_a}】 日均销量对比概览")
+        k1, k2, k3 = st.columns(3)
+        k1.metric(f"{month_a} 全盘日均销量", f"{daily_units_A:.1f} 件/天", help=f"当月天数: {days_a} 天")
+        k2.metric(f"{month_b} 全盘日均销量", f"{daily_units_B:.1f} 件/天", delta=f"{diff_daily_units:+.1f} 件/天 ({pct_daily_units:+.1f}%)", help=f"当月天数: {days_b} 天")
+        k3.metric("月天数差异", f"{days_b - days_a:+} 天", help="自动排查因为大小月/润年天数不同造成的总销差额")
 
-        st.markdown(f"#### 📌 【{month_b}】 vs 【{month_a}】 核心对比结果")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric(f"{month_a} 销售额", f"${cost_A:,.2f}")
-        k2.metric(f"{month_b} 销售额", f"${cost_B:,.2f}", delta=f"${diff_cost:+,.2f} ({pct_cost:+.1f}%)")
-        k3.metric(f"{month_a} 销量", f"{int(units_A):,} 件")
-        k4.metric(f"{month_b} 销量", f"{int(units_B):,} 件", delta=f"{int(diff_units):+,} 件 ({pct_units:+.1f}%)")
+        # SKU 级别的日均销量对比
+        st.markdown("### 📦 双月各 SKU【日均销量 (件/天)】增减变化排行榜")
 
-        # -----------------------------------------------------------------
-        # SKU 维度的月度增减量排查
-        # -----------------------------------------------------------------
-        st.markdown("### 📦 两个月份之间 SKU 销量/金额增减变化明细")
+        sku_mA_v = df_mA.groupby(sku_col).agg({'Clean_Units': 'sum'}).reset_index()
+        sku_mA_v['Daily_A'] = sku_mA_v['Clean_Units'] / days_a
 
-        sku_mA = df_mA.groupby(sku_col).agg({'Clean_Cost': 'sum', 'Clean_Units': 'sum'}).reset_index().rename(columns={'Clean_Cost': 'Cost_A', 'Clean_Units': 'Units_A'})
-        sku_mB = df_mB.groupby(sku_col).agg({'Clean_Cost': 'sum', 'Clean_Units': 'sum'}).reset_index().rename(columns={'Clean_Cost': 'Cost_B', 'Clean_Units': 'Units_B'})
+        sku_mB_v = df_mB.groupby(sku_col).agg({'Clean_Units': 'sum'}).reset_index()
+        sku_mB_v['Daily_B'] = sku_mB_v['Clean_Units'] / days_b
 
-        sku_comp = pd.merge(sku_mA, sku_mB, on=sku_col, how='outer').fillna(0)
-        sku_comp['Cost_Diff'] = sku_comp['Cost_B'] - sku_comp['Cost_A']
-        sku_comp['Units_Diff'] = sku_comp['Units_B'] - sku_comp['Units_A']
-        sku_comp = sku_comp.sort_values(by='Cost_Diff', ascending=False)
+        sku_v_comp = pd.merge(
+            sku_mA_v[[sku_col, 'Clean_Units', 'Daily_A']],
+            sku_mB_v[[sku_col, 'Clean_Units', 'Daily_B']],
+            on=sku_col, how='outer'
+        ).fillna(0)
 
-        tab_inc, tab_dec, tab_comp_all = st.tabs(["🚀 增长拉动 TOP SKU", "🔻 下滑拖累 TOP SKU", "📊 全部 SKU 对比总表"])
+        sku_v_comp['Daily_Diff'] = sku_v_comp['Daily_B'] - sku_v_comp['Daily_A']
+        sku_v_comp['Daily_Growth (%)'] = (sku_v_comp['Daily_Diff'] / sku_v_comp['Daily_A']) * 100
+        sku_v_comp['Daily_Growth (%)'] = sku_v_comp['Daily_Growth (%)'].fillna(0).replace([float('inf'), -float('inf')], 0)
 
-        with tab_inc:
-            st.caption(f"在 {month_b} 相比 {month_a} 销售额增长最多的 SKU 列表：")
+        sku_v_comp = sku_v_comp.sort_values(by='Daily_Diff', ascending=False)
+
+        tab_v_inc, tab_v_dec, tab_v_all = st.tabs(["🚀 日均销量提速 TOP SKU", "🔻 日均销量失速 TOP SKU", "📊 全部 SKU 日均对比表"])
+
+        with tab_v_inc:
+            st.caption(f"在 {month_b} 相比 {month_a} **日均出货件数增长最多** 的产品：")
             st.dataframe(
-                sku_comp[sku_comp['Cost_Diff'] > 0].rename(columns={
-                    sku_col: '产品 SKU', 'Cost_A': f'{month_a} 金额 ($)', 'Cost_B': f'{month_b} 金额 ($)',
-                    'Cost_Diff': '金额增量 ($)', 'Units_A': f'{month_a} 销量', 'Units_B': f'{month_b} 销量', 'Units_Diff': '销量增量'
+                sku_v_comp[sku_v_comp['Daily_Diff'] > 0].rename(columns={
+                    sku_col: '产品 SKU', 
+                    'Clean_Units_x': f'{month_a} 总销量', 'Daily_A': f'{month_a} 日均 (件/天)',
+                    'Clean_Units_y': f'{month_b} 总销量', 'Daily_B': f'{month_b} 日均 (件/天)',
+                    'Daily_Diff': '日均销量增量 (件/天)', 'Daily_Growth (%)': '日均增速 (%)'
                 }).style.format({
-                    f'{month_a} 金额 ($)': '${:,.2f}', f'{month_b} 金额 ($)': '${:,.2f}', '金额增量 ($)': '+${:,.2f}',
-                    f'{month_a} 销量': '{:,.0f}', f'{month_b} 销量': '{:,.0f}', '销量增量': '+{:,.0f}'
+                    f'{month_a} 总销量': '{:,.0f}', f'{month_a} 日均 (件/天)': '{:,.1f}',
+                    f'{month_b} 总销量': '{:,.0f}', f'{month_b} 日均 (件/天)': '{:,.1f}',
+                    '日均销量增量 (件/天)': '+{:,.1f} 件/天', '日均增速 (%)': '+{:.1f}%'
                 }), use_container_width=True
             )
 
-        with tab_dec:
-            st.caption(f"在 {month_b} 相比 {month_a} 销售额下滑最多的 SKU 列表：")
+        with tab_v_dec:
+            st.caption(f"在 {month_b} 相比 {month_a} **日均出货件数下滑最多** 的产品：")
             st.dataframe(
-                sku_comp[sku_comp['Cost_Diff'] < 0].sort_values(by='Cost_Diff', ascending=True).rename(columns={
-                    sku_col: '产品 SKU', 'Cost_A': f'{month_a} 金额 ($)', 'Cost_B': f'{month_b} 金额 ($)',
-                    'Cost_Diff': '金额减量 ($)', 'Units_A': f'{month_a} 销量', 'Units_B': f'{month_b} 销量', 'Units_Diff': '销量减量'
+                sku_v_comp[sku_v_comp['Daily_Diff'] < 0].sort_values(by='Daily_Diff', ascending=True).rename(columns={
+                    sku_col: '产品 SKU', 
+                    'Clean_Units_x': f'{month_a} 总销量', 'Daily_A': f'{month_a} 日均 (件/天)',
+                    'Clean_Units_y': f'{month_b} 总销量', 'Daily_B': f'{month_b} 日均 (件/天)',
+                    'Daily_Diff': '日均销量减量 (件/天)', 'Daily_Growth (%)': '日均增速 (%)'
                 }).style.format({
-                    f'{month_a} 金额 ($)': '${:,.2f}', f'{month_b} 金额 ($)': '${:,.2f}', '金额减量 ($)': '${:,.2f}',
-                    f'{month_a} 销量': '{:,.0f}', f'{month_b} 销量': '{:,.0f}', '销量减量': '{:,.0f}'
+                    f'{month_a} 总销量': '{:,.0f}', f'{month_a} 日均 (件/天)': '{:,.1f}',
+                    f'{month_b} 总销量': '{:,.0f}', f'{month_b} 日均 (件/天)': '{:,.1f}',
+                    '日均销量减量 (件/天)': '{:,.1f} 件/天', '日均增速 (%)': '{:.1f}%'
                 }), use_container_width=True
             )
 
-        with tab_comp_all:
+        with tab_v_all:
             st.dataframe(
-                sku_comp.rename(columns={
-                    sku_col: '产品 SKU', 'Cost_A': f'{month_a} 金额 ($)', 'Cost_B': f'{month_b} 金额 ($)',
-                    'Cost_Diff': '金额变化 ($)', 'Units_A': f'{month_a} 销量', 'Units_B': f'{month_b} 销量', 'Units_Diff': '销量变化'
+                sku_v_comp.rename(columns={
+                    sku_col: '产品 SKU', 
+                    'Clean_Units_x': f'{month_a} 总销量', 'Daily_A': f'{month_a} 日均 (件/天)',
+                    'Clean_Units_y': f'{month_b} 总销量', 'Daily_B': f'{month_b} 日均 (件/天)',
+                    'Daily_Diff': '日均变化 (件/天)', 'Daily_Growth (%)': '日均增速 (%)'
                 }).style.format({
-                    f'{month_a} 金额 ($)': '${:,.2f}', f'{month_b} 金额 ($)': '${:,.2f}', '金额变化 ($)': '${:,.2f}',
-                    f'{month_a} 销量': '{:,.0f}', f'{month_b} 销量': '{:,.0f}', '销量变化': '{:,.0f}'
+                    f'{month_a} 总销量': '{:,.0f}', f'{month_a} 日均 (件/天)': '{:,.1f}',
+                    f'{month_b} 总销量': '{:,.0f}', f'{month_b} 日均 (件/天)': '{:,.1f}',
+                    '日均变化 (件/天)': '{:,.1f}', '日均增速 (%)': '{:+.1f}%'
                 }), use_container_width=True
             )
 
         st.markdown("---")
 
         # -----------------------------------------------------------------
-        # 品类维度的月度结构演变
+        # 3. 品类维度的月度结构演变
         # -----------------------------------------------------------------
         st.subheader("🏷️ 3. 月度品类结构分布与演变 (Category Mix)")
         cat_monthly = df_sales.groupby(['Year_Month', 'Clean_Category']).agg({'Clean_Cost': 'sum', 'Clean_Units': 'sum'}).reset_index()
@@ -515,7 +472,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
             else: st.info("暂未识别到潜力广告。")
 
 # =========================================================================
-# 模块四：下月销售目标与 SKU 销量拆解看板 (Target Setting & SKU Forecasting)
+# 模块四：下月销售目标与 SKU 销量拆解看板
 # =========================================================================
 else:
     st.title("🎯 下月销售目标制定与 SKU 销量预测拆解看板")
@@ -592,7 +549,6 @@ else:
         st.markdown("---")
 
         st.subheader("📦 2. 各 SKU 下月预测销量与每日目标件数拆解清单")
-        st.caption("系统已根据每个 SKU 近 30 天的**销售贡献权重**与**件单价**，将总目标精准拆解至各个 SKU：")
 
         sku_recent['Sales_Share'] = sku_recent['Recent_Cost'] / last_month_cost if last_month_cost > 0 else 0
         sku_recent['Target_Cost_Allocated'] = target_total_cost * sku_recent['Sales_Share']
@@ -628,14 +584,3 @@ else:
             }),
             use_container_width=True
         )
-
-        st.markdown("---")
-
-        st.subheader("📊 3. 重点 SKU 下月目标销量 vs 近 30 天实际销量对比")
-        top10_forecast = forecast_df.head(10)
-        
-        fig_target = go.Figure()
-        fig_target.add_trace(go.Bar(x=top10_forecast['产品 SKU'], y=top10_forecast['近30天销量 (件)'], name='近 30 天实际销量', marker_color='#93C5FD'))
-        fig_target.add_trace(go.Bar(x=top10_forecast['产品 SKU'], y=top10_forecast['下月预测销量 (件)'], name='下月目标拆解销量', marker_color='#1D4ED8'))
-        fig_target.update_layout(barmode='group', hovermode="x unified", title="TOP 10 重点 SKU 下月拆解目标与历史对比 (件)")
-        st.plotly_chart(fig_target, use_container_width=True)
