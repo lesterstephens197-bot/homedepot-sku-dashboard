@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import calendar
 
 # 页面基础配置
 st.set_page_config(
@@ -18,12 +19,41 @@ module = st.sidebar.radio(
     "请选择分析模块",
     [
         "📊 销售与品类管理决策看板", 
+        "📅 月度多维度对比与趋势看板",  # 🆕 新增月度对比模块
         "📢 SPA 广告绩效诊断与运营看板",
-        "🎯 下月销售目标与 SKU 销量拆解看板"  # 🆕 新增模块选项
+        "🎯 下月销售目标与 SKU 销量拆解看板"
     ]
 )
 
 st.sidebar.markdown("---")
+
+# =========================================================================
+# 辅助函数：统一处理销售数据清洗
+# =========================================================================
+def process_sales_data(df_sales):
+    df_sales.columns = df_sales.columns.str.strip()
+
+    date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
+    sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
+    cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
+    category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
+    state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
+    sku_fields_available = [col for col in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if col in df_sales.columns]
+
+    if not date_col or not sales_col or not sku_fields_available:
+        return None, f"解析失败！未能在表格中识别到必需列（日期、销量或产品SKU列）。当前列为: {list(df_sales.columns)}"
+
+    df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
+    df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
+    df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
+    df_sales['Clean_Category'] = df_sales[category_col].astype(str).str.strip().replace({'nan': '未分类', 'None': '未分类', '': '未分类'}) if category_col else '未分类'
+    if state_col:
+        df_sales['Clean_State'] = df_sales[state_col].astype(str).str.strip().str.upper().replace({'NAN': '未知', 'NONE': '未知', '': '未知'})
+
+    primary_sku_col = sku_fields_available[0]
+    df_sales['YearMonth'] = df_sales['Clean_Date'].dt.to_period('M').astype(str)
+
+    return (df_sales, primary_sku_col), None
 
 # =========================================================================
 # 模块一：销售与品类管理决策看板 (Sales & Management Dashboard)
@@ -40,38 +70,17 @@ if module == "📊 销售与品类管理决策看板":
         st.info("👋 请在侧边栏上传 Excel 或 CSV 格式的 Home Depot 销售报表。")
     else:
         try:
-            if uploaded_sales_file.name.endswith('.csv'):
-                df_sales = pd.read_csv(uploaded_sales_file)
-            else:
-                df_sales = pd.read_excel(uploaded_sales_file)
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
         except Exception as e:
             st.error(f"读取文件失败，请检查文件格式: {e}")
             st.stop()
 
-        df_sales.columns = df_sales.columns.str.strip()
-
-        # 表头自动匹配
-        date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
-        sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
-        cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
-        category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
-        state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
-
-        sku_fields_available = [col for col in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if col in df_sales.columns]
-
-        if not date_col or not sales_col or not sku_fields_available:
-            st.error(f"解析失败！未能在表格中识别到必需列（日期、销量或产品SKU列）。当前识别到的表头列为: {list(df_sales.columns)}")
+        res, err = process_sales_data(df_raw)
+        if err:
+            st.error(err)
             st.stop()
-
-        # 数据清洗
-        df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
-        df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
-        df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
-        df_sales['Clean_Category'] = df_sales[category_col].astype(str).str.strip().replace({'nan': '未分类', 'None': '未分类', '': '未分类'}) if category_col else '未分类'
-        if state_col:
-            df_sales['Clean_State'] = df_sales[state_col].astype(str).str.strip().str.upper().replace({'NAN': '未知', 'NONE': '未知', '': '未知'})
-
-        primary_sku_col = sku_fields_available[0]
+        
+        df_sales, primary_sku_col = res
 
         # 时间筛选
         min_d = df_sales['Clean_Date'].min().date()
@@ -229,7 +238,7 @@ if module == "📊 销售与品类管理决策看板":
 
         elif view_mode == "🗺️ 全美物流仓储与地理分布":
             st.subheader("🗺️ 全美各州销量热力分布")
-            if state_col and 'Clean_State' in filtered_sales.columns:
+            if 'Clean_State' in filtered_sales.columns:
                 state_df = filtered_sales.groupby('Clean_State').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
                 state_df['Share_Pct'] = (state_df['Clean_Units'] / total_units) * 100 if total_units > 0 else 0
                 state_df = state_df.sort_values(by='Clean_Units', ascending=False)
@@ -250,7 +259,167 @@ if module == "📊 销售与品类管理决策看板":
             st.plotly_chart(fig_cat, use_container_width=True)
 
 # =========================================================================
-# 模块二：广告绩效诊断与运营看板 (SPA Ad Operations Dashboard)
+# 🆕 模块二：月度多维度对比与趋势看板 (Monthly Trend & Comparison)
+# =========================================================================
+elif module == "📅 月度多维度对比与趋势看板":
+    st.title("📅 月度多维度对比与 SKU 动销效率看板")
+    st.caption("按月份维度进行全盘大盘对比，并逐月拆解各 SKU 的动销天数、动销日均销量及自然日均表现")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 销售数据上传")
+    uploaded_sales_file = st.sidebar.file_uploader("上传销售报表 (CSV/Excel)", type=["csv", "xlsx"], key="monthly_uploader")
+
+    if not uploaded_sales_file:
+        st.info("👋 请在侧边栏上传 Excel 或 CSV 格式的销售报表以开启月度对比。")
+    else:
+        try:
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
+        except Exception as e:
+            st.error(f"读取文件失败: {e}"); st.stop()
+
+        res, err = process_sales_data(df_raw)
+        if err: st.error(err); st.stop()
+        df_sales, primary_sku_col = res
+
+        # 月份选择
+        all_months = sorted(df_sales['YearMonth'].unique())
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🗓️ 2. 月份选择")
+        selected_months = st.sidebar.multiselect("选择要对比的月份", all_months, default=all_months)
+
+        if not selected_months:
+            st.warning("请在侧边栏至少选择一个月份！")
+            st.stop()
+
+        m_sales = df_sales[df_sales['YearMonth'].isin(selected_months)]
+
+        # -----------------------------------------------------------------
+        # 1. 大盘月度趋势与柱状图对比
+        # -----------------------------------------------------------------
+        st.subheader("📈 1. 整体销售额与销量月度趋势走势")
+        
+        monthly_summary = m_sales.groupby('YearMonth').agg(
+            Total_Cost=('Clean_Cost', 'sum'),
+            Total_Units=('Clean_Units', 'sum'),
+            Active_SKUs=(primary_sku_col, lambda x: x[m_sales.loc[x.index, 'Clean_Units'] > 0].nunique())
+        ).reset_index()
+
+        monthly_summary['ASP'] = monthly_summary.apply(lambda r: r['Total_Cost'] / r['Total_Units'] if r['Total_Units'] > 0 else 0, axis=1)
+
+        fig_m_trend = go.Figure()
+        fig_m_trend.add_trace(go.Bar(x=monthly_summary['YearMonth'], y=monthly_summary['Total_Cost'], name='销售总额 ($)', marker_color='#3B82F6'))
+        fig_m_trend.add_trace(go.Scatter(x=monthly_summary['YearMonth'], y=monthly_summary['Total_Units'], name='总出货量 (件)', yaxis='y2', line=dict(color='#F59E0B', width=3), mode='lines+markers'))
+
+        fig_m_trend.update_layout(
+            title="逐月销售额 ($) vs 销量 (件) 对比走势",
+            hovermode="x unified",
+            yaxis=dict(title="销售总额 ($)"),
+            yaxis2=dict(title="出货件数 (件)", overlaying='y', side='right')
+        )
+        st.plotly_chart(fig_m_trend, use_container_width=True)
+
+        # 月度大盘汇总表格
+        st.markdown("##### 📊 月度核心经营指标汇总表")
+        st.dataframe(
+            monthly_summary.rename(columns={
+                'YearMonth': '月份', 'Total_Cost': '销售总额 ($)', 'Total_Units': '销售总量 (件)',
+                'Active_SKUs': '动销 SKU 数', 'ASP': '均价 / ASP ($)'
+            }).style.format({
+                '销售总额 ($)': '${:,.2f}', '销售总量 (件)': '{:,.0f}', '均价 / ASP ($)': '${:,.2f}'
+            }), use_container_width=True
+        )
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 2. 各 SKU 月度动销效率深度拆解
+        # -----------------------------------------------------------------
+        st.subheader("📦 2. 各 SKU 月度动销效率深度对比矩阵")
+        st.caption("精准计算每个 SKU 在各个自然月内的 **可动销天数**、**动销日均销量**（按实际出单天数算）以及 **自然日均销量**（按全月自然天数算）。")
+
+        # 计算算法：按 [SKU, YearMonth] 聚合
+        sku_m_group = m_sales.groupby([primary_sku_col, 'YearMonth'])
+
+        def calc_month_metrics(df_sub):
+            units = df_sub['Clean_Units'].sum()
+            cost = df_sub['Clean_Cost'].sum()
+            
+            # 当月出单天数
+            active_days = df_sub[df_sub['Clean_Units'] > 0]['Clean_Date'].nunique()
+            
+            # 当月自然天数 (获取该月天数)
+            ym = df_sub['YearMonth'].iloc[0]
+            year, month = map(int, ym.split('-'))
+            days_in_month = calendar.monthrange(year, month)[1]
+
+            active_daily_avg = units / active_days if active_days > 0 else 0
+            overall_daily_avg = units / days_in_month if days_in_month > 0 else 0
+
+            return pd.Series({
+                'Monthly_Units': units,
+                'Monthly_Cost': cost,
+                'Active_Days': active_days,
+                'Days_In_Month': days_in_month,
+                'Active_Daily_Avg': active_daily_avg,
+                'Overall_Daily_Avg': overall_daily_avg
+            })
+
+        sku_monthly_df = sku_m_group.apply(calc_month_metrics).reset_index()
+
+        # 展示模式切换：透视表模式 vs 明细列表模式
+        st.markdown("##### 🔀 数据展示视角选择")
+        view_type = st.radio("请选择视角", ["📊 矩阵透视表 (横向对比各月动销走势)", "📋 逐月明细数据表 (包含全量详细指标)"], horizontal=True)
+
+        if view_type == "📊 矩阵透视表 (横向对比各月动销走势)":
+            metric_choice = st.selectbox(
+                "选择透视表呈现的核心指标",
+                ["Active_Daily_Avg", "Active_Days", "Monthly_Units", "Monthly_Cost"],
+                format_func=lambda x: {
+                    "Active_Daily_Avg": "🔥 动销日均销量 (件/天) - 按有销量天数计算",
+                    "Active_Days": "🗓️ 可动销天数 (天) - 当月有出单的天数",
+                    "Monthly_Units": "📦 月度总销量 (件)",
+                    "Monthly_Cost": "💰 月度总销售额 ($)"
+                }[x]
+            )
+
+            pivot_df = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values=metric_choice).fillna(0)
+            
+            # 计算全周期合计排序
+            pivot_df['合计/平均'] = pivot_df.mean(axis=1) if "Avg" in metric_choice else pivot_df.sum(axis=1)
+            pivot_df = pivot_df.sort_values(by='合计/平均', ascending=False)
+
+            st.dataframe(
+                pivot_df.style.format("{:.1f}" if "Avg" in metric_choice else ("${:,.2f}" if "Cost" in metric_choice else "{:,.0f}")),
+                use_container_width=True
+            )
+
+        else:
+            # 筛选 SKU
+            all_skus = sku_monthly_df[primary_sku_col].unique()
+            sku_filter = st.multiselect("筛选指定 SKU", all_skus, default=all_skus[:10] if len(all_skus) >= 10 else all_skus)
+            
+            filtered_sku_m = sku_monthly_df[sku_monthly_df[primary_sku_col].isin(sku_filter)].sort_values(by=[primary_sku_col, 'YearMonth'])
+
+            disp_sku_m = filtered_sku_m.rename(columns={
+                primary_sku_col: '产品 SKU', 'YearMonth': '月份',
+                'Monthly_Cost': '月销售额 ($)', 'Monthly_Units': '月出货量 (件)',
+                'Active_Days': '当月动销天数 (天)', 'Days_In_Month': '当月自然天数 (天)',
+                'Active_Daily_Avg': '动销日均销量 (件/天)', 'Overall_Daily_Avg': '自然日均销量 (件/天)'
+            })
+
+            st.dataframe(
+                disp_sku_m[[
+                    '产品 SKU', '月份', '月销售额 ($)', '月出货量 (件)', 
+                    '当月动销天数 (天)', '当月自然天数 (天)', '动销日均销量 (件/天)', '自然日均销量 (件/天)'
+                ]].style.format({
+                    '月销售额 ($)': '${:,.2f}', '月出货量 (件)': '{:,.0f}',
+                    '当月动销天数 (天)': '{:.0f} 天', '当月自然天数 (天)': '{:.0f} 天',
+                    '动销日均销量 (件/天)': '{:,.1f} 件/天', '自然日均销量 (件/天)': '{:,.1f} 件/天'
+                }), use_container_width=True
+            )
+
+# =========================================================================
+# 模块三：广告绩效诊断与运营看板 (SPA Ad Operations Dashboard)
 # =========================================================================
 elif module == "📢 SPA 广告绩效诊断与运营看板":
     st.title("📢 Home Depot SPA 广告绩效诊断与运营决策看板")
@@ -333,7 +502,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
             else: st.info("暂未识别到潜力广告。")
 
 # =========================================================================
-# 模块三：下月销售目标与 SKU 销量拆解看板 (🆕 Target Setting & SKU Forecasting)
+# 模块四：下月销售目标与 SKU 销量拆解看板 (Target Setting & SKU Forecasting)
 # =========================================================================
 else:
     st.title("🎯 下月销售目标制定与 SKU 销量预测拆解看板")
@@ -347,26 +516,13 @@ else:
         st.info("👋 请先在侧边栏上传历史销售报表。系统将自动抓取近 30 天的动销数据进行下月目标推演。")
     else:
         try:
-            if uploaded_sales_file.name.endswith('.csv'): df_sales = pd.read_csv(uploaded_sales_file)
-            else: df_sales = pd.read_excel(uploaded_sales_file)
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
         except Exception as e:
             st.error(f"读取文件失败: {e}"); st.stop()
 
-        df_sales.columns = df_sales.columns.str.strip()
-
-        date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
-        sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
-        cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
-        sku_col = next((c for c in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if c in df_sales.columns), None)
-
-        if not date_col or not sales_col or not sku_col:
-            st.error("数据表缺失关键列（日期、销量或 SKU），请检查上载的文件！")
-            st.stop()
-
-        # 数据预处理
-        df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
-        df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
-        df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
+        res, err = process_sales_data(df_raw)
+        if err: st.error(err); st.stop()
+        df_sales, sku_col = res
 
         # 取最近 30 天数据作为计算权重的基准期
         max_date = df_sales['Clean_Date'].max()
