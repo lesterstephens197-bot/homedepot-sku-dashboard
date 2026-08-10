@@ -259,11 +259,11 @@ if module == "📊 销售与品类管理决策看板":
             st.plotly_chart(fig_cat, use_container_width=True)
 
 # =========================================================================
-# 模块二：月度多维度对比与趋势看板 (🎯 动销日均速率下滑预警)
+# 模块二：月度多维度对比与趋势看板 (动销日均上升 & 下降诊断看板)
 # =========================================================================
 elif module == "📅 月度多维度对比与趋势看板":
-    st.title("📅 月度多维度对比与 SKU 动销效率看板")
-    st.caption("按月份对比大盘走势、拆解动销天数，并实时监测 SKU【动销日均出货速率】下滑预警")
+    st.title("📅 月度多维度对比与动销日均升降幅诊断看板")
+    st.caption("聚焦动销效率：精准对比各个 SKU 在不同月份的『动销日均销量』升降幅度，自动排查上升爆款与下滑风险款")
     st.markdown("---")
 
     st.sidebar.header("⚙️ 1. 销售数据上传")
@@ -284,51 +284,16 @@ elif module == "📅 月度多维度对比与趋势看板":
         # 月份选择
         all_months = sorted(df_sales['YearMonth'].unique())
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### 🗓️ 2. 月份选择与动销日均预警参数")
-        selected_months = st.sidebar.multiselect("选择要对比的月份 (至少选2个月开启对比)", all_months, default=all_months)
+        st.sidebar.markdown("### 🗓️ 2. 对比月份设定")
+        selected_months = st.sidebar.multiselect("选择要对比的月份 (建议选2个月以上)", all_months, default=all_months)
 
         if not selected_months:
             st.warning("请在侧边栏至少选择一个月份！")
             st.stop()
 
-        # -----------------------------------------------------------------
-        # 🔥 动销日均预警阈值设置 (侧边栏)
-        # -----------------------------------------------------------------
-        drop_threshold_pct = st.sidebar.number_input("🚨 动销日均降幅预警线 (MoM %)", min_value=5.0, max_value=100.0, value=20.0, step=5.0, help="当最新月份较上月的【动销日均销量】下滑超过该百分比时触发报警")
-        min_active_avg_base = st.sidebar.number_input("🔥 触发预警的前月最小动销日均 (件/天)", min_value=0.5, value=2.0, step=0.5, help="过滤基数极小的小微 SKU，只有上月动销日均达到该件数才开启检测")
-
         m_sales = df_sales[df_sales['YearMonth'].isin(selected_months)]
 
-        # -----------------------------------------------------------------
-        # 1. 大盘月度趋势与柱状图对比
-        # -----------------------------------------------------------------
-        st.subheader("📈 1. 整体销售额与销量月度趋势走势")
-        
-        monthly_summary = m_sales.groupby('YearMonth').agg(
-            Total_Cost=('Clean_Cost', 'sum'),
-            Total_Units=('Clean_Units', 'sum'),
-            Active_SKUs=(primary_sku_col, lambda x: x[m_sales.loc[x.index, 'Clean_Units'] > 0].nunique())
-        ).reset_index()
-
-        monthly_summary['ASP'] = monthly_summary.apply(lambda r: r['Total_Cost'] / r['Total_Units'] if r['Total_Units'] > 0 else 0, axis=1)
-
-        fig_m_trend = go.Figure()
-        fig_m_trend.add_trace(go.Bar(x=monthly_summary['YearMonth'], y=monthly_summary['Total_Cost'], name='销售总额 ($)', marker_color='#3B82F6'))
-        fig_m_trend.add_trace(go.Scatter(x=monthly_summary['YearMonth'], y=monthly_summary['Total_Units'], name='总出货量 (件)', yaxis='y2', line=dict(color='#F59E0B', width=3), mode='lines+markers'))
-
-        fig_m_trend.update_layout(
-            title="逐月销售额 ($) vs 销量 (件) 对比走势",
-            hovermode="x unified",
-            yaxis=dict(title="销售总额 ($)"),
-            yaxis2=dict(title="出货件数 (件)", overlaying='y', side='right')
-        )
-        st.plotly_chart(fig_m_trend, use_container_width=True)
-
-        st.markdown("---")
-
-        # -----------------------------------------------------------------
-        # 2. 各 SKU 月度动销天数与动销日均计算
-        # -----------------------------------------------------------------
+        # 1. 动销日均与基础月度数据计算
         active_m_sales = m_sales[m_sales['Clean_Units'] > 0]
         active_days_df = active_m_sales.groupby([primary_sku_col, 'YearMonth'])['Clean_Date'].nunique().reset_index()
         active_days_df.rename(columns={'Clean_Date': 'Active_Days'}, inplace=True)
@@ -352,170 +317,149 @@ elif module == "📅 月度多维度对比与趋势看板":
         sku_monthly_df['Active_Daily_Avg'] = sku_monthly_df.apply(
             lambda r: r['Monthly_Units'] / r['Active_Days'] if r['Active_Days'] > 0 else 0, axis=1
         )
-        sku_monthly_df['Overall_Daily_Avg'] = sku_monthly_df.apply(
-            lambda r: r['Monthly_Units'] / r['Days_In_Month'] if r['Days_In_Month'] > 0 else 0, axis=1
-        )
 
         # -----------------------------------------------------------------
-        # 🚨 动销日均销量（Active Daily Avg）下滑预警逻辑
+        # 🚀 核心部分：动销日均（Active Daily Avg）升降幅推演 (针对最近两个已选月份)
         # -----------------------------------------------------------------
         sorted_sel_months = sorted(selected_months)
-        
-        has_warning_data = False
-        warning_skus_df = pd.DataFrame()
+        has_comparison = len(sorted_sel_months) >= 2
 
-        if len(sorted_sel_months) >= 2:
-            has_warning_data = True
+        if has_comparison:
             latest_m = sorted_sel_months[-1]
             prev_m = sorted_sel_months[-2]
 
-            # 针对【动销日均销量 Active_Daily_Avg】进行透视计算
-            active_avg_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
+            # 提取透视表
+            avg_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
             units_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Monthly_Units').fillna(0)
             days_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Days').fillna(0)
 
-            if latest_m in active_avg_pivot.columns and prev_m in active_avg_pivot.columns:
-                mom_df = active_avg_pivot[[prev_m, latest_m]].copy()
-                mom_df.columns = ['Prev_Active_Avg', 'Latest_Active_Avg']
-                
-                # 附加销量与天数以便追溯原因
-                mom_df['Prev_Units'] = units_pivot[prev_m]
-                mom_df['Latest_Units'] = units_pivot[latest_m]
-                mom_df['Prev_Active_Days'] = days_pivot[prev_m]
-                mom_df['Latest_Active_Days'] = days_pivot[latest_m]
+            comp_df = pd.DataFrame(index=avg_pivot.index)
+            comp_df['Prev_Active_Avg'] = avg_pivot[prev_m]
+            comp_df['Latest_Active_Avg'] = avg_pivot[latest_m]
+            comp_df['Prev_Units'] = units_pivot[prev_m]
+            comp_df['Latest_Units'] = units_pivot[latest_m]
+            comp_df['Prev_Active_Days'] = days_pivot[prev_m]
+            comp_df['Latest_Active_Days'] = days_pivot[latest_m]
 
-                # 计算动销日均的差值与环比变化幅度
-                mom_df['Diff_Active_Avg'] = mom_df['Latest_Active_Avg'] - mom_df['Prev_Active_Avg']
-                mom_df['MoM_Active_Avg_Growth (%)'] = mom_df.apply(
-                    lambda r: ((r['Latest_Active_Avg'] - r['Prev_Active_Avg']) / r['Prev_Active_Avg'] * 100) if r['Prev_Active_Avg'] > 0 else (100.0 if r['Latest_Active_Avg'] > 0 else 0), axis=1
-                )
+            # 计算动销日均变化量与变化率
+            comp_df['Diff_Active_Avg'] = comp_df['Latest_Active_Avg'] - comp_df['Prev_Active_Avg']
+            comp_df['Growth_Active_Avg (%)'] = comp_df.apply(
+                lambda r: ((r['Latest_Active_Avg'] - r['Prev_Active_Avg']) / r['Prev_Active_Avg'] * 100) if r['Prev_Active_Avg'] > 0 else (100.0 if r['Latest_Active_Avg'] > 0 else 0), axis=1
+            )
 
-                # 判断动销速率报警状态
-                def set_active_avg_warning(row):
-                    if row['Prev_Active_Avg'] >= min_active_avg_base:
-                        if row['MoM_Active_Avg_Growth (%)'] <= -drop_threshold_pct:
-                            return '🚨 动销速率严重下滑预警'
-                        elif row['MoM_Active_Avg_Growth (%)'] < 0:
-                            return '⚠️ 动销速率小幅放缓'
-                    if row['MoM_Active_Avg_Growth (%)'] > 0:
-                        return '🟢 动销速率提升'
-                    return '➖ 平稳/低频出单'
+            # 分类：大幅上升、轻微上升、平稳、下滑
+            def classify_trend(r):
+                diff = r['Diff_Active_Avg']
+                if diff > 0.5: return '🚀 动销日均大幅上升'
+                elif diff > 0: return '📈 动销日均微升'
+                elif diff == 0: return '➖ 日均持平'
+                elif diff >= -0.5: return '⚠️ 动销日均微降'
+                else: return '📉 动销日均大幅下滑'
 
-                mom_df['Warning_Status'] = mom_df.apply(set_active_avg_warning, axis=1)
-                
-                # 筛选出触发预警的名单（按日均减少量排序）
-                warning_skus_df = mom_df[mom_df['Warning_Status'] == '🚨 动销速率严重下滑预警'].sort_values(by='Diff_Active_Avg', ascending=True).reset_index()
+            comp_df['Trend_Status'] = comp_df.apply(classify_trend, axis=1)
+            comp_df = comp_df.reset_index()
 
-        # -----------------------------------------------------------------
-        # 3. 动销日均预警 KPI 诊断模块
-        # -----------------------------------------------------------------
-        st.subheader("🚨 2. SKU 动销日均出货速率诊断中心")
-        
-        if has_warning_data and not warning_skus_df.empty:
-            alert_count = len(warning_skus_df)
-            avg_drop = abs(warning_skus_df['MoM_Active_Avg_Growth (%)'].mean())
+            # 筛选上升榜与下降榜
+            up_skus = comp_df[comp_df['Diff_Active_Avg'] > 0].sort_values(by='Diff_Active_Avg', ascending=False)
+            down_skus = comp_df[comp_df['Diff_Active_Avg'] < 0].sort_values(by='Diff_Active_Avg', ascending=True)
 
-            w_c1, w_c2, w_c3 = st.columns(3)
-            w_c1.error(f"🚨 **预警 SKU 数量**: **{alert_count}** 款\n\n对比 `{prev_m}` ➡️ `{latest_m}`，动销日均降幅 ≥ {drop_threshold_pct}%")
-            w_c2.warning(f"📉 **预警 SKU 平均出货速率放缓**: **-{avg_drop:.1f}%**\n\n仅针对触警 SKU，排除断货天数影响后真实速率下降")
-            w_c3.info(f"⚙️ **判定规则**: \n\n前月动销日均 ≥ {min_active_avg_base:.1f} 件/天，且降幅 ≥ {drop_threshold_pct}%")
+            # -------------------------------------------------------------
+            # 2. KPI 概览与看板
+            # -------------------------------------------------------------
+            st.subheader(f"⚡ 1. 动销日均效率变化总览 (`{prev_m}` ➡️ `{latest_m}`)")
+            
+            col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+            col_kpi1.success(f"🚀 **动销日均上升 SKU 数**: **{len(up_skus)}** 款\n\n日均出货效率有所提升，爆款动销提速")
+            col_kpi2.error(f"📉 **动销日均下滑 SKU 数**: **{len(down_skus)}** 款\n\n日均出货效率走低，需排查流量与库存")
+            col_kpi3.info(f"➖ **日均持平/无出单 SKU 数**: **{len(comp_df) - len(up_skus) - len(down_skus)}** 款")
 
-        elif has_warning_data:
-            st.success(f"🎉 表现优秀！在选定对比月份 (`{prev_m}` ➡️ `{latest_m}`) 中，没有发现出单日均速率下滑超过 {drop_threshold_pct}% 的重点 SKU。")
-        else:
-            st.info("💡 请在侧边栏勾选至少 2 个月份，系统将自动进行最新月份的动销日均速率环比警示。")
+            st.markdown("---")
 
-        st.markdown("---")
+            # -------------------------------------------------------------
+            # 3. Top 10 动销日均上升/下降对比图
+            # -------------------------------------------------------------
+            st.subheader("📊 2. 动销日均变化 Top 10 榜单可视化")
+            g1, g2 = st.columns(2)
 
-        # -----------------------------------------------------------------
-        # 4. 详细对比矩阵与预警列表展示
-        # -----------------------------------------------------------------
-        st.subheader("📦 3. 各 SKU 月度动销效率与预警明细矩阵")
+            with g1:
+                st.markdown("##### 🚀 动销日均销量『上升幅度最大 Top 10』 (件/天)")
+                top_up = up_skus.head(10)
+                if not top_up.empty:
+                    fig_up = px.bar(top_up, x=primary_sku_col, y='Diff_Active_Avg', text='Diff_Active_Avg', color_discrete_sequence=['#10B981'], labels={primary_sku_col: '产品 SKU', 'Diff_Active_Avg': '日均提升量 (件/天)'})
+                    fig_up.update_traces(texttemplate='+%{text:.1f} 件/天', textposition='outside')
+                    st.plotly_chart(fig_up, use_container_width=True)
+                else:
+                    st.info("暂无上升 SKU")
 
-        tabs_list = ["📊 矩阵透视表 (横向走势)", "📋 逐月明细列表"]
-        if has_warning_data and not warning_skus_df.empty:
-            tabs_list.insert(0, f"🚨 动销日均严重下滑名单 ({len(warning_skus_df)} 款)")
+            with g2:
+                st.markdown("##### 📉 动销日均销量『下滑幅度最大 Top 10』 (件/天)")
+                top_down = down_skus.head(10)
+                if not top_down.empty:
+                    fig_down = px.bar(top_down, x=primary_sku_col, y='Diff_Active_Avg', text='Diff_Active_Avg', color_discrete_sequence=['#EF4444'], labels={primary_sku_col: '产品 SKU', 'Diff_Active_Avg': '日均下滑量 (件/天)'})
+                    fig_down.update_traces(texttemplate='%{text:.1f} 件/天', textposition='outside')
+                    st.plotly_chart(fig_down, use_container_width=True)
+                else:
+                    st.info("暂无下滑 SKU")
 
-        active_tabs = st.tabs(tabs_list)
+            st.markdown("---")
 
-        # Tab 1: 展示动销日均预警清单
-        if has_warning_data and not warning_skus_df.empty:
-            with active_tabs[0]:
-                st.markdown(f"##### 🚨 对比区间 `{prev_m}` ➡️ `{latest_m}` 动销日均 (件/天) 大幅放缓 SKU 报警清单")
-                disp_warn = warning_skus_df.rename(columns={
+            # -------------------------------------------------------------
+            # 4. 列表详情 (分 Tab 呈现上升/下降/全量)
+            # -------------------------------------------------------------
+            st.subheader("📋 3. 动销日均升降幅 SKU 详细诊断清单")
+            tab_up, tab_down, tab_pivot, tab_all = st.tabs([
+                f"🚀 动销日均上升榜 ({len(up_skus)} 款)", 
+                f"📉 动销日均下滑榜 ({len(down_skus)} 款)", 
+                "📊 全月份动销日均透视矩阵",
+                "📋 完整升降数据清单"
+            ])
+
+            def render_avg_table(df_subset):
+                disp = df_subset.rename(columns={
                     primary_sku_col: '产品 SKU',
+                    'Trend_Status': '趋势状态',
                     'Prev_Active_Avg': f'{prev_m} 动销日均 (件/天)',
                     'Latest_Active_Avg': f'{latest_m} 动销日均 (件/天)',
-                    'Diff_Active_Avg': '日均减少量 (件/天)',
-                    'MoM_Active_Avg_Growth (%)': '动销日均环比 (%)',
-                    'Prev_Active_Days': f'{prev_m} 出单天数',
-                    'Latest_Active_Days': f'{latest_m} 出单天数',
-                    'Warning_Status': '预警状态'
+                    'Diff_Active_Avg': '日均变动量 (件/天)',
+                    'Growth_Active_Avg (%)': '动销日均变化率 (%)',
+                    'Prev_Units': f'{prev_m} 总销量 (件)',
+                    'Latest_Units': f'{latest_m} 总销量 (件)',
+                    'Prev_Active_Days': f'{prev_m} 动销天数',
+                    'Latest_Active_Days': f'{latest_m} 动销天数'
                 })
                 st.dataframe(
-                    disp_warn[[
-                        '产品 SKU', '预警状态', 
-                        f'{prev_m} 动销日均 (件/天)', f'{latest_m} 动销日均 (件/天)', 
-                        '日均减少量 (件/天)', '动销日均环比 (%)',
-                        f'{prev_m} 出单天数', f'{latest_m} 出单天数'
+                    disp[[
+                        '产品 SKU', '趋势状态', f'{latest_m} 动销日均 (件/天)', f'{prev_m} 动销日均 (件/天)',
+                        '日均变动量 (件/天)', '动销日均变化率 (%)', f'{latest_m} 总销量 (件)', f'{prev_m} 总销量 (件)'
                     ]].style.format({
-                        f'{prev_m} 动销日均 (件/天)': '{:,.1f} 件/天',
-                        f'{latest_m} 动销日均 (件/天)': '{:,.1f} 件/天',
-                        '日均减少量 (件/天)': '{:,.1f} 件/天',
-                        '动销日均环比 (%)': '{:+.1f}%',
-                        f'{prev_m} 出单天数': '{:.0f} 天',
-                        f'{latest_m} 出单天数': '{:.0f} 天'
+                        f'{latest_m} 动销日均 (件/天)': '{:.1f}',
+                        f'{prev_m} 动销日均 (件/天)': '{:.1f}',
+                        '日均变动量 (件/天)': '{:+.1f}',
+                        '动销日均变化率 (%)': '{:+.1f}%',
+                        f'{latest_m} 总销量 (件)': '{:,.0f}',
+                        f'{prev_m} 总销量 (件)': '{:,.0f}'
                     }), use_container_width=True
                 )
 
-        # 透视表 Tab
-        pivot_tab = active_tabs[1] if (has_warning_data and not warning_skus_df.empty) else active_tabs[0]
-        with pivot_tab:
-            metric_choice = st.selectbox(
-                "选择透视表呈现的核心指标",
-                ["Active_Daily_Avg", "Active_Days", "Monthly_Units", "Monthly_Cost"],
-                format_func=lambda x: {
-                    "Active_Daily_Avg": "🔥 动销日均销量 (件/天) - 按有销量天数计算",
-                    "Active_Days": "🗓️ 可动销天数 (天) - 当月有出单的天数",
-                    "Monthly_Units": "📦 月度总销量 (件)",
-                    "Monthly_Cost": "💰 月度总销售额 ($)"
-                }[x]
-            )
+            with tab_up:
+                if not up_skus.empty: render_avg_table(up_skus)
+                else: st.info("没有发现动销日均上升的 SKU。")
 
-            pivot_df = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values=metric_choice).fillna(0)
-            pivot_df['合计/平均'] = pivot_df.mean(axis=1) if "Avg" in metric_choice else pivot_df.sum(axis=1)
-            pivot_df = pivot_df.sort_values(by='合计/平均', ascending=False)
+            with tab_down:
+                if not down_skus.empty: render_avg_table(down_skus)
+                else: st.info("没有发现动销日均下滑的 SKU。")
 
-            st.dataframe(
-                pivot_df.style.format("{:.1f}" if "Avg" in metric_choice else ("${:,.2f}" if "Cost" in metric_choice else "{:,.0f}")),
-                use_container_width=True
-            )
+            with tab_pivot:
+                p_avg = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
+                p_avg['平均动销日均'] = p_avg.mean(axis=1)
+                p_avg = p_avg.sort_values(by='平均动销日均', ascending=False)
+                st.dataframe(p_avg.style.format("{:.1f} 件/天"), use_container_width=True)
 
-        # 明细表 Tab
-        detail_tab = active_tabs[2] if (has_warning_data and not warning_skus_df.empty) else active_tabs[1]
-        with detail_tab:
-            all_skus = sku_monthly_df[primary_sku_col].unique()
-            sku_filter = st.multiselect("筛选指定 SKU", all_skus, default=all_skus[:10] if len(all_skus) >= 10 else all_skus)
-            
-            filtered_sku_m = sku_monthly_df[sku_monthly_df[primary_sku_col].isin(sku_filter)].sort_values(by=[primary_sku_col, 'YearMonth'])
+            with tab_all:
+                render_avg_table(comp_df.sort_values(by='Diff_Active_Avg', ascending=False))
 
-            disp_sku_m = filtered_sku_m.rename(columns={
-                primary_sku_col: '产品 SKU', 'YearMonth': '月份',
-                'Monthly_Cost': '月销售额 ($)', 'Monthly_Units': '月出货量 (件)',
-                'Active_Days': '当月动销天数 (天)', 'Days_In_Month': '当月自然天数 (天)',
-                'Active_Daily_Avg': '动销日均销量 (件/天)', 'Overall_Daily_Avg': '自然日均销量 (件/天)'
-            })
-
-            st.dataframe(
-                disp_sku_m[[
-                    '产品 SKU', '月份', '月销售额 ($)', '月出货量 (件)', 
-                    '当月动销天数 (天)', '当月自然天数 (天)', '动销日均销量 (件/天)', '自然日均销量 (件/天)'
-                ]].style.format({
-                    '月销售额 ($)': '${:,.2f}', '月出货量 (件)': '{:,.0f}',
-                    '当月动销天数 (天)': '{:.0f} 天', '当月自然天数 (天)': '{:.0f} 天',
-                    '动销日均销量 (件/天)': '{:,.1f} 件/天', '自然日均销量 (件/天)': '{:,.1f} 件/天'
-                }), use_container_width=True
-            )
+        else:
+            st.info("💡 请在侧边栏至少勾选 2 个月份，系统将自动对这 2 个月份的『动销日均销量』进行对比和分析！")
 
 # =========================================================================
 # 模块三：广告绩效诊断与运营看板 (SPA Ad Operations Dashboard)
