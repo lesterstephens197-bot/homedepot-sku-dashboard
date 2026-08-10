@@ -19,7 +19,7 @@ module = st.sidebar.radio(
     "请选择分析模块",
     [
         "📊 销售与品类管理决策看板", 
-        "📅 月度多维度对比与趋势看板",  # 🆕 新增月度对比模块
+        "📅 月度多维度对比与趋势看板", 
         "📢 SPA 广告绩效诊断与运营看板",
         "🎯 下月销售目标与 SKU 销量拆解看板"
     ]
@@ -259,7 +259,7 @@ if module == "📊 销售与品类管理决策看板":
             st.plotly_chart(fig_cat, use_container_width=True)
 
 # =========================================================================
-# 🆕 模块二：月度多维度对比与趋势看板 (Monthly Trend & Comparison)
+# 模块二：月度多维度对比与趋势看板 (Monthly Trend & Comparison)
 # =========================================================================
 elif module == "📅 月度多维度对比与趋势看板":
     st.title("📅 月度多维度对比与 SKU 动销效率看板")
@@ -332,39 +332,43 @@ elif module == "📅 月度多维度对比与趋势看板":
         st.markdown("---")
 
         # -----------------------------------------------------------------
-        # 2. 各 SKU 月度动销效率深度拆解
+        # 2. 各 SKU 月度动销效率深度拆解（已修复 KeyError）
         # -----------------------------------------------------------------
         st.subheader("📦 2. 各 SKU 月度动销效率深度对比矩阵")
         st.caption("精准计算每个 SKU 在各个自然月内的 **可动销天数**、**动销日均销量**（按实际出单天数算）以及 **自然日均销量**（按全月自然天数算）。")
 
-        # 计算算法：按 [SKU, YearMonth] 聚合
-        sku_m_group = m_sales.groupby([primary_sku_col, 'YearMonth'])
+        # 仅对出单记录（销量 > 0）计算动销天数
+        active_m_sales = m_sales[m_sales['Clean_Units'] > 0]
+        active_days_df = active_m_sales.groupby([primary_sku_col, 'YearMonth'])['Clean_Date'].nunique().reset_index()
+        active_days_df.rename(columns={'Clean_Date': 'Active_Days'}, inplace=True)
 
-        def calc_month_metrics(df_sub):
-            units = df_sub['Clean_Units'].sum()
-            cost = df_sub['Clean_Cost'].sum()
-            
-            # 当月出单天数
-            active_days = df_sub[df_sub['Clean_Units'] > 0]['Clean_Date'].nunique()
-            
-            # 当月自然天数 (获取该月天数)
-            ym = df_sub['YearMonth'].iloc[0]
-            year, month = map(int, ym.split('-'))
-            days_in_month = calendar.monthrange(year, month)[1]
+        # 基础聚合：计算月销售额和月销量
+        sku_monthly_df = m_sales.groupby([primary_sku_col, 'YearMonth']).agg(
+            Monthly_Units=('Clean_Units', 'sum'),
+            Monthly_Cost=('Clean_Cost', 'sum')
+        ).reset_index()
 
-            active_daily_avg = units / active_days if active_days > 0 else 0
-            overall_daily_avg = units / days_in_month if days_in_month > 0 else 0
+        # 合并动销天数
+        sku_monthly_df = pd.merge(sku_monthly_df, active_days_df, on=[primary_sku_col, 'YearMonth'], how='left')
+        sku_monthly_df['Active_Days'] = sku_monthly_df['Active_Days'].fillna(0)
 
-            return pd.Series({
-                'Monthly_Units': units,
-                'Monthly_Cost': cost,
-                'Active_Days': active_days,
-                'Days_In_Month': days_in_month,
-                'Active_Daily_Avg': active_daily_avg,
-                'Overall_Daily_Avg': overall_daily_avg
-            })
+        # 计算当月自然天数 (Days_In_Month)
+        def get_days_in_month(ym_str):
+            try:
+                year, month = map(int, ym_str.split('-'))
+                return calendar.monthrange(year, month)[1]
+            except:
+                return 30
 
-        sku_monthly_df = sku_m_group.apply(calc_month_metrics).reset_index()
+        sku_monthly_df['Days_In_Month'] = sku_monthly_df['YearMonth'].apply(get_days_in_month)
+
+        # 计算动销日均与自然日均
+        sku_monthly_df['Active_Daily_Avg'] = sku_monthly_df.apply(
+            lambda r: r['Monthly_Units'] / r['Active_Days'] if r['Active_Days'] > 0 else 0, axis=1
+        )
+        sku_monthly_df['Overall_Daily_Avg'] = sku_monthly_df.apply(
+            lambda r: r['Monthly_Units'] / r['Days_In_Month'] if r['Days_In_Month'] > 0 else 0, axis=1
+        )
 
         # 展示模式切换：透视表模式 vs 明细列表模式
         st.markdown("##### 🔀 数据展示视角选择")
