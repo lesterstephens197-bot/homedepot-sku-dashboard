@@ -18,6 +18,7 @@ st.sidebar.title("📌 功能看板导航")
 module = st.sidebar.radio(
     "请选择分析模块",
     [
+        "🔥 SKU 7天/15天销量变化看板",
         "📊 销售与品类管理决策看板", 
         "📅 月度多维度对比与趋势看板", 
         "📢 SPA 广告绩效诊断与运营看板",
@@ -55,10 +56,226 @@ def process_sales_data(df_sales):
 
     return (df_sales, primary_sku_col), None
 
+
 # =========================================================================
-# 模块一：销售与品类管理决策看板 (Sales & Management Dashboard)
+# 模块一：🔥 SKU 7天/15天销量变化看板 (新增重点模块)
 # =========================================================================
-if module == "📊 销售与品类管理决策看板":
+if module == "🔥 SKU 7天/15天销量变化看板":
+    st.title("🔥 SKU 7天 / 15天 销量变化与爆款趋势诊断看板")
+    st.caption("聚焦短期与中期动销爆发力：对比近 7 天 vs 前 7 天、近 15 天 vs 前 15 天的销量与日均变动，快速定位飙升款与下滑风险款")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 销售数据上传")
+    uploaded_sales_file = st.sidebar.file_uploader("上传 Home Depot 销售报表 (CSV/Excel)", type=["csv", "xlsx"], key="short_term_uploader")
+
+    if not uploaded_sales_file:
+        st.info("👋 请在侧边栏上传包含历史每日销量的销售报表。")
+    else:
+        try:
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
+        except Exception as e:
+            st.error(f"读取文件失败: {e}"); st.stop()
+
+        res, err = process_sales_data(df_raw)
+        if err: st.error(err); st.stop()
+        df_sales, sku_col = res
+
+        max_date = df_sales['Clean_Date'].max()
+        min_date = df_sales['Clean_Date'].min()
+
+        st.sidebar.success(f"📅 数据时间跨度：\n{min_date.strftime('%Y-%m-%d')} 至 {max_date.strftime('%Y-%m-%d')}")
+
+        # 定义 4 个对比区间
+        d_last_7_start = max_date - pd.Timedelta(days=6)
+        d_prev_7_start = max_date - pd.Timedelta(days=13)
+        d_prev_7_end = max_date - pd.Timedelta(days=7)
+
+        d_last_15_start = max_date - pd.Timedelta(days=14)
+        d_prev_15_start = max_date - pd.Timedelta(days=29)
+        d_prev_15_end = max_date - pd.Timedelta(days=15)
+
+        # 过滤数据
+        df_l7 = df_sales[(df_sales['Clean_Date'] >= d_last_7_start) & (df_sales['Clean_Date'] <= max_date)]
+        df_p7 = df_sales[(df_sales['Clean_Date'] >= d_prev_7_start) & (df_sales['Clean_Date'] <= d_prev_7_end)]
+
+        df_l15 = df_sales[(df_sales['Clean_Date'] >= d_last_15_start) & (df_sales['Clean_Date'] <= max_date)]
+        df_p15 = df_sales[(df_sales['Clean_Date'] >= d_prev_15_start) & (df_sales['Clean_Date'] <= d_prev_15_end)]
+
+        # 聚合计算每个 SKU 在各区间的销量
+        s_l7 = df_l7.groupby(sku_col).agg(Units_L7=('Clean_Units', 'sum'), Cost_L7=('Clean_Cost', 'sum'))
+        s_p7 = df_p7.groupby(sku_col).agg(Units_P7=('Clean_Units', 'sum'))
+
+        s_l15 = df_l15.groupby(sku_col).agg(Units_L15=('Clean_Units', 'sum'), Cost_L15=('Clean_Cost', 'sum'))
+        s_p15 = df_p15.groupby(sku_col).agg(Units_P15=('Clean_Units', 'sum'))
+
+        # 合并数据集
+        all_skus = pd.DataFrame({sku_col: df_sales[sku_col].unique()})
+        metrics_df = all_skus.merge(s_l7, on=sku_col, how='left')\
+                             .merge(s_p7, on=sku_col, how='left')\
+                             .merge(s_l15, on=sku_col, how='left')\
+                             .merge(s_p15, on=sku_col, how='left')\
+                             .fillna(0)
+
+        # 指算：7天/15天 差异与增长率
+        metrics_df['Diff_7D'] = metrics_df['Units_L7'] - metrics_df['Units_P7']
+        metrics_df['Growth_7D (%)'] = metrics_df.apply(
+            lambda r: ((r['Units_L7'] - r['Units_P7']) / r['Units_P7'] * 100) if r['Units_P7'] > 0 else (100.0 if r['Units_L7'] > 0 else 0), axis=1
+        )
+
+        metrics_df['Diff_15D'] = metrics_df['Units_L15'] - metrics_df['Units_P15']
+        metrics_df['Growth_15D (%)'] = metrics_df.apply(
+            lambda r: ((r['Units_L15'] - r['Units_P15']) / r['Units_P15'] * 100) if r['Units_P15'] > 0 else (100.0 if r['Units_L15'] > 0 else 0), axis=1
+        )
+
+        metrics_df['Avg_Daily_7D'] = metrics_df['Units_L7'] / 7.0
+        metrics_df['Avg_Daily_15D'] = metrics_df['Units_L15'] / 15.0
+
+        # 状态分类算法
+        def classify_status(r):
+            if r['Units_L7'] == 0 and r['Units_P7'] == 0:
+                return "⚠️ 近两周无动销"
+            elif r['Growth_7D (%)'] >= 50 and r['Diff_7D'] >= 5:
+                return "🚀 7天爆发增长"
+            elif r['Growth_7D (%)'] <= -30 and r['Diff_7D'] <= -5:
+                return "📉 7天急剧下滑"
+            elif r['Growth_15D (%)'] >= 20:
+                return "📈 15天稳步上升"
+            elif r['Growth_15D (%)'] <= -20:
+                return "🔻 15天处于下行"
+            else:
+                return "➖ 平稳波动"
+
+        metrics_df['Status'] = metrics_df.apply(classify_status, axis=1)
+
+        # -----------------------------------------------------------------
+        # 1. 顶部大盘 KPI Summary
+        # -----------------------------------------------------------------
+        st.subheader("📌 1. 7天 & 15天 全盘动销概览")
+        c1, c2, c3, c4 = st.columns(4)
+
+        u7_total = metrics_df['Units_L7'].sum()
+        u7_prev = metrics_df['Units_P7'].sum()
+        g7_total = ((u7_total - u7_prev) / u7_prev * 100) if u7_prev > 0 else 0
+
+        u15_total = metrics_df['Units_L15'].sum()
+        u15_prev = metrics_df['Units_P15'].sum()
+        g15_total = ((u15_total - u15_prev) / u15_prev * 100) if u15_prev > 0 else 0
+
+        c1.metric("近 7 天总出货量", f"{int(u7_total):,} 件", delta=f"{g7_total:+.1f}% vs 前7天")
+        c2.metric("近 15 天总出货量", f"{int(u15_total):,} 件", delta=f"{g15_total:+.1f}% vs 前15天")
+        c3.metric("近 7 天日均销售额", f"${(metrics_df['Cost_L7'].sum() / 7):,.2f} /天")
+        c4.metric("7天爆发增长 SKU", f"{len(metrics_df[metrics_df['Status'] == '🚀 7天爆发增长'])} 款")
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 2. 7天 / 15天 异动 Top 10 榜单可视化
+        # -----------------------------------------------------------------
+        st.subheader("📊 2. 销量变动 TOP 10 榜单 (7天 vs 15天)")
+
+        time_view = st.radio("选择评估维度", ["⚡ 近 7 天销量变化", "🗓️ 近 15 天销量变化"], horizontal=True)
+
+        col_left, col_right = st.columns(2)
+
+        if "7" in time_view:
+            top_up = metrics_df.sort_values(by='Diff_7D', ascending=False).head(10)
+            top_down = metrics_df.sort_values(by='Diff_7D', ascending=True).head(10)
+            diff_col, growth_col, label_name = 'Diff_7D', 'Growth_7D (%)', '7天增加量'
+        else:
+            top_up = metrics_df.sort_values(by='Diff_15D', ascending=False).head(10)
+            top_down = metrics_df.sort_values(by='Diff_15D', ascending=True).head(10)
+            diff_col, growth_col, label_name = 'Diff_15D', 'Growth_15D (%)', '15天增加量'
+
+        with col_left:
+            st.markdown(f"##### 🚀 销量【增长最高 Top 10】")
+            fig_up = px.bar(top_up, x=sku_col, y=diff_col, text=diff_col,
+                            hover_data=[growth_col], color_discrete_sequence=['#10B981'],
+                            labels={sku_col: '产品 SKU', diff_col: label_name})
+            fig_up.update_traces(texttemplate='+%{text:,d} 件', textposition='outside')
+            st.plotly_chart(fig_up, use_container_width=True)
+
+        with col_right:
+            st.markdown(f"##### 📉 销量【下滑最严 Top 10】")
+            fig_down = px.bar(top_down, x=sku_col, y=diff_col, text=diff_col,
+                              hover_data=[growth_col], color_discrete_sequence=['#EF4444'],
+                              labels={sku_col: '产品 SKU', diff_col: label_name})
+            fig_down.update_traces(texttemplate='%{text:,d} 件', textposition='outside')
+            st.plotly_chart(fig_down, use_container_width=True)
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 3. 各 SKU 详细诊断与筛选全景表
+        # -----------------------------------------------------------------
+        st.subheader("📋 3. 各 SKU 7天/15天 销量变化明细表")
+
+        status_filter = st.multiselect(
+            "按状态快速筛选",
+            options=list(metrics_df['Status'].unique()),
+            default=list(metrics_df['Status'].unique())
+        )
+
+        filtered_metrics = metrics_df[metrics_df['Status'].isin(status_filter)].sort_values(by='Units_L7', ascending=False)
+
+        disp_metrics = filtered_metrics.rename(columns={
+            sku_col: '产品 SKU',
+            'Status': '趋势状态',
+            'Units_L7': '近7天销量',
+            'Units_P7': '前7天销量',
+            'Diff_7D': '7天销量变动',
+            'Growth_7D (%)': '7天增长率 (%)',
+            'Avg_Daily_7D': '近7天日均',
+            'Units_L15': '近15天销量',
+            'Units_P15': '前15天销量',
+            'Diff_15D': '15天销量变动',
+            'Growth_15D (%)': '15天增长率 (%)',
+            'Avg_Daily_15D': '近15天日均',
+            'Cost_L7': '近7天销售额 ($)'
+        })
+
+        st.dataframe(
+            disp_metrics[[
+                '产品 SKU', '趋势状态', '近7天销量', '前7天销量', '7天销量变动', '7天增长率 (%)', '近7天日均',
+                '近15天销量', '前15天销量', '15天销量变动', '15天增长率 (%)', '近15天日均', '近7天销售额 ($)'
+            ]].style.format({
+                '近7天销量': '{:,.0f}', '前7天销量': '{:,.0f}', '7天销量变动': '{:+,.0f}', '7天增长率 (%)': '{:+.1f}%', '近7天日均': '{:.1f}',
+                '近15天销量': '{:,.0f}', '前15天销量': '{:,.0f}', '15天销量变动': '{:+,.0f}', '15天增长率 (%)': '{:+.1f}%', '近15天日均': '{:.1f}',
+                '近7天销售额 (\()': '\){:,.2f}'
+            }), use_container_width=True
+        )
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 4. 单 SKU 7天/15天 每日走势穿透图
+        # -----------------------------------------------------------------
+        st.subheader("🔍 4. 单 SKU 每日销量走势与均线穿透")
+        selected_sku = st.selectbox("选择要分析的 SKU", metrics_df[sku_col].unique())
+
+        single_sku_df = df_sales[df_sales[sku_col] == selected_sku].sort_values('Clean_Date')
+
+        if not single_sku_df.empty:
+            # 补齐可能缺失的日期
+            date_range_all = pd.date_range(start=min_date, end=max_date)
+            single_sku_df = single_sku_df.groupby('Clean_Date').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reindex(date_range_all, fill_value=0).reset_index()
+            single_sku_df.rename(columns={'index': 'Clean_Date'}, inplace=True)
+
+            single_sku_df['7D_MA'] = single_sku_df['Clean_Units'].rolling(window=7, min_periods=1).mean()
+            single_sku_df['15D_MA'] = single_sku_df['Clean_Units'].rolling(window=15, min_periods=1).mean()
+
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Bar(x=single_sku_df['Clean_Date'], y=single_sku_df['Clean_Units'], name='每日销量 (件)', marker_color='#93C5FD'))
+            fig_trend.add_trace(go.Scatter(x=single_sku_df['Clean_Date'], y=single_sku_df['7D_MA'], name='7天移动平均', line=dict(color='#10B981', width=2.5)))
+            fig_trend.add_trace(go.Scatter(x=single_sku_df['Clean_Date'], y=single_sku_df['15D_MA'], name='15天移动平均', line=dict(color='#F59E0B', width=2.5, dash='dash')))
+
+            fig_trend.update_layout(title=f"SKU: {selected_sku} - 每日销量及 7天/15天 移动平均线", hovermode="x unified", yaxis=dict(title="销量 (件)"))
+            st.plotly_chart(fig_trend, use_container_width=True)
+
+
+# =========================================================================
+# 模块二：销售与品类管理决策看板
+# =========================================================================
+elif module == "📊 销售与品类管理决策看板":
     st.title("📊 Home Depot 销售绩效与品类管理决策看板")
     st.caption("聚焦管理与运营决策：大盘走势、帕累托 ABC 爆款诊断、全美物流布局与动销效率分析")
     st.markdown("---")
@@ -79,7 +296,7 @@ if module == "📊 销售与品类管理决策看板":
         if err:
             st.error(err)
             st.stop()
-        
+
         df_sales, primary_sku_col = res
 
         # 时间筛选
@@ -191,7 +408,7 @@ if module == "📊 销售与品类管理决策看板":
                     '产品 SKU', '销售总额 ($)', '销售总量 (件)', '可动销天数 (天)', 
                     '动销日均销量 (件/天)', '销售额占比 (%)', '累计占比 (%)', '首次出单日期', '最近出单日期'
                 ]].style.format({
-                    '销售总额 ($)': '${:,.2f}', '销售总量 (件)': '{:,.0f}', '可动销天数 (天)': '{:,.0f} 天',
+                    '销售总额 (\()': '\){:,.2f}', '销售总量 (件)': '{:,.0f}', '可动销天数 (天)': '{:,.0f} 天',
                     '动销日均销量 (件/天)': '{:,.1f} 件/天', '销售额占比 (%)': '{:.2f}%', '累计占比 (%)': '{:.2f}%'
                 }), use_container_width=True
             )
@@ -217,7 +434,7 @@ if module == "📊 销售与品类管理决策看板":
                 total_sku_units = sku_df['Clean_Units'].sum()
                 total_sku_cost = sku_df['Clean_Cost'].sum()
                 daily_summary = sku_df.groupby('Clean_Date').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
-                
+
                 total_range_days = (end_date - start_date).days + 1
                 active_days = len(daily_summary[daily_summary['Clean_Units'] > 0])
                 overall_avg = total_sku_units / total_range_days if total_range_days > 0 else 0
@@ -259,7 +476,7 @@ if module == "📊 销售与品类管理决策看板":
             st.plotly_chart(fig_cat, use_container_width=True)
 
 # =========================================================================
-# 模块二：月度多维度对比与趋势看板 (动销日均上升 & 下降诊断看板)
+# 模块三：月度多维度对比与趋势看板
 # =========================================================================
 elif module == "📅 月度多维度对比与趋势看板":
     st.title("📅 月度多维度对比与动销日均升降幅诊断看板")
@@ -293,7 +510,6 @@ elif module == "📅 月度多维度对比与趋势看板":
 
         m_sales = df_sales[df_sales['YearMonth'].isin(selected_months)]
 
-        # 1. 动销日均与基础月度数据计算
         active_m_sales = m_sales[m_sales['Clean_Units'] > 0]
         active_days_df = active_m_sales.groupby([primary_sku_col, 'YearMonth'])['Clean_Date'].nunique().reset_index()
         active_days_df.rename(columns={'Clean_Date': 'Active_Days'}, inplace=True)
@@ -318,9 +534,6 @@ elif module == "📅 月度多维度对比与趋势看板":
             lambda r: r['Monthly_Units'] / r['Active_Days'] if r['Active_Days'] > 0 else 0, axis=1
         )
 
-        # -----------------------------------------------------------------
-        # 🚀 核心部分：动销日均（Active Daily Avg）升降幅推演 (针对最近两个已选月份)
-        # -----------------------------------------------------------------
         sorted_sel_months = sorted(selected_months)
         has_comparison = len(sorted_sel_months) >= 2
 
@@ -328,7 +541,6 @@ elif module == "📅 月度多维度对比与趋势看板":
             latest_m = sorted_sel_months[-1]
             prev_m = sorted_sel_months[-2]
 
-            # 提取透视表
             avg_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
             units_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Monthly_Units').fillna(0)
             days_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Days').fillna(0)
@@ -341,13 +553,11 @@ elif module == "📅 月度多维度对比与趋势看板":
             comp_df['Prev_Active_Days'] = days_pivot[prev_m]
             comp_df['Latest_Active_Days'] = days_pivot[latest_m]
 
-            # 计算动销日均变化量与变化率
             comp_df['Diff_Active_Avg'] = comp_df['Latest_Active_Avg'] - comp_df['Prev_Active_Avg']
             comp_df['Growth_Active_Avg (%)'] = comp_df.apply(
                 lambda r: ((r['Latest_Active_Avg'] - r['Prev_Active_Avg']) / r['Prev_Active_Avg'] * 100) if r['Prev_Active_Avg'] > 0 else (100.0 if r['Latest_Active_Avg'] > 0 else 0), axis=1
             )
 
-            # 分类：大幅上升、轻微上升、平稳、下滑
             def classify_trend(r):
                 diff = r['Diff_Active_Avg']
                 if diff > 0.5: return '🚀 动销日均大幅上升'
@@ -359,25 +569,18 @@ elif module == "📅 月度多维度对比与趋势看板":
             comp_df['Trend_Status'] = comp_df.apply(classify_trend, axis=1)
             comp_df = comp_df.reset_index()
 
-            # 筛选上升榜与下降榜
             up_skus = comp_df[comp_df['Diff_Active_Avg'] > 0].sort_values(by='Diff_Active_Avg', ascending=False)
             down_skus = comp_df[comp_df['Diff_Active_Avg'] < 0].sort_values(by='Diff_Active_Avg', ascending=True)
 
-            # -------------------------------------------------------------
-            # 2. KPI 概览与看板
-            # -------------------------------------------------------------
             st.subheader(f"⚡ 1. 动销日均效率变化总览 (`{prev_m}` ➡️ `{latest_m}`)")
-            
+
             col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-            col_kpi1.success(f"🚀 **动销日均上升 SKU 数**: **{len(up_skus)}** 款\n\n日均出货效率有所提升，爆款动销提速")
-            col_kpi2.error(f"📉 **动销日均下滑 SKU 数**: **{len(down_skus)}** 款\n\n日均出货效率走低，需排查流量与库存")
+            col_kpi1.success(f"🚀 **动销日均上升 SKU 数**: **{len(up_skus)}** 款\n\n日均出货效率有所提升")
+            col_kpi2.error(f"📉 **动销日均下滑 SKU 数**: **{len(down_skus)}** 款\n\n日均出货效率走低，需排查流量")
             col_kpi3.info(f"➖ **日均持平/无出单 SKU 数**: **{len(comp_df) - len(up_skus) - len(down_skus)}** 款")
 
             st.markdown("---")
 
-            # -------------------------------------------------------------
-            # 3. Top 10 动销日均上升/下降对比图
-            # -------------------------------------------------------------
             st.subheader("📊 2. 动销日均变化 Top 10 榜单可视化")
             g1, g2 = st.columns(2)
 
@@ -403,9 +606,6 @@ elif module == "📅 月度多维度对比与趋势看板":
 
             st.markdown("---")
 
-            # -------------------------------------------------------------
-            # 4. 列表详情 (分 Tab 呈现上升/下降/全量)
-            # -------------------------------------------------------------
             st.subheader("📋 3. 动销日均升降幅 SKU 详细诊断清单")
             tab_up, tab_down, tab_pivot, tab_all = st.tabs([
                 f"🚀 动销日均上升榜 ({len(up_skus)} 款)", 
@@ -423,9 +623,7 @@ elif module == "📅 月度多维度对比与趋势看板":
                     'Diff_Active_Avg': '日均变动量 (件/天)',
                     'Growth_Active_Avg (%)': '动销日均变化率 (%)',
                     'Prev_Units': f'{prev_m} 总销量 (件)',
-                    'Latest_Units': f'{latest_m} 总销量 (件)',
-                    'Prev_Active_Days': f'{prev_m} 动销天数',
-                    'Latest_Active_Days': f'{latest_m} 动销天数'
+                    'Latest_Units': f'{latest_m} 总销量 (件)'
                 })
                 st.dataframe(
                     disp[[
@@ -459,10 +657,10 @@ elif module == "📅 月度多维度对比与趋势看板":
                 render_avg_table(comp_df.sort_values(by='Diff_Active_Avg', ascending=False))
 
         else:
-            st.info("💡 请在侧边栏至少勾选 2 个月份，系统将自动对这 2 个月份的『动销日均销量』进行对比和分析！")
+            st.info("💡 请在侧边栏至少勾选 2 个月份以进行对比分析！")
 
 # =========================================================================
-# 模块三：广告绩效诊断与运营看板 (SPA Ad Operations Dashboard)
+# 模块四：SPA 广告绩效诊断与运营看板
 # =========================================================================
 elif module == "📢 SPA 广告绩效诊断与运营看板":
     st.title("📢 Home Depot SPA 广告绩效诊断与运营决策看板")
@@ -476,8 +674,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
         st.info("👋 请在侧边栏上传您的 Home Depot SPA 广告报表。")
     else:
         try:
-            if uploaded_ad_file.name.endswith('.csv'): df_ad = pd.read_csv(uploaded_ad_file)
-            else: df_ad = pd.read_excel(uploaded_ad_file)
+            df_ad = pd.read_csv(uploaded_ad_file) if uploaded_ad_file.name.endswith('.csv') else pd.read_excel(uploaded_ad_file)
         except Exception as e:
             st.error(f"读取广告文件失败: {e}"); st.stop()
 
@@ -491,7 +688,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
         omsid_col = next((c for c in df_ad.columns if c in ['Promoted OMSID Number', 'OMSID', 'Promoted OMS ID']), None)
 
         if not campaign_col or not spend_col or not sales_col:
-            st.error(f"解析失败！请确保包含 Campaign Name, Spend, SPA Sales 列。")
+            st.error("解析失败！请确保包含 Campaign Name, Spend, SPA Sales 列。")
             st.stop()
 
         for col in [spend_col, sales_col, clicks_col, impressions_col, roas_col]:
@@ -529,7 +726,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
         potential_df = df_ad[(df_ad[roas_col] >= target_roas) & (df_ad[spend_col] < (total_spend / max(len(df_ad), 1)))]
 
         d1, d2, d3 = st.columns(3)
-        d1.error(f"🔻 **无效花费资金浪费**: `${total_wasted_spend:,.2f}`\n\n**{len(wasted_df)}** 项 Spend ≥ ${waste_spend_threshold} 且出单为 0。")
+        d1.error(f"🔻 **无效花费资金浪费**: `\({total_wasted_spend:,.2f}`\n\n**{len(wasted_df)}** 项 Spend ≥\){waste_spend_threshold} 且出单为 0。")
         d2.warning(f"⚠️ **低效出血点广告**: **{len(bleed_df)}** 项\n\nSpend ≥ ${waste_spend_threshold} 且 ROAS 远低于目标。")
         d3.success(f"🚀 **高 ROAS 扩量机会**: **{len(potential_df)}** 项\n\nROAS 达标（≥ {target_roas}），建议增加每日预算！")
 
@@ -545,7 +742,7 @@ elif module == "📢 SPA 广告绩效诊断与运营看板":
             else: st.info("暂未识别到潜力广告。")
 
 # =========================================================================
-# 模块四：下月销售目标与 SKU 销量拆解看板 (Target Setting & SKU Forecasting)
+# 模块五：下月销售目标与 SKU 销量拆解看板
 # =========================================================================
 else:
     st.title("🎯 下月销售目标制定与 SKU 销量预测拆解看板")
@@ -586,14 +783,11 @@ else:
 
         last_month_cost = sku_recent['Recent_Cost'].sum()
 
-        # -----------------------------------------------------------------
-        # 目标参数设定区
-        # -----------------------------------------------------------------
         st.sidebar.markdown("---")
         st.sidebar.markdown("### ⚙️ 2. 下月目标设定参数")
-        
+
         target_mode = st.sidebar.radio("目标制定方式", ["按销售额增长率 (%)", "按自定义总销售额 ($)"])
-        
+
         if target_mode == "按销售额增长率 (%)":
             growth_rate = st.sidebar.number_input("下月目标增长率 (%)", value=10.0, step=1.0)
             target_total_cost = last_month_cost * (1 + growth_rate / 100)
@@ -601,73 +795,55 @@ else:
             target_total_cost = st.sidebar.number_input("下月目标总金额 ($)", value=float(round(last_month_cost * 1.1, 2)))
             growth_rate = ((target_total_cost - last_month_cost) / last_month_cost * 100) if last_month_cost > 0 else 0
 
-        # -----------------------------------------------------------------
         # 1. 下月目标概览 KPI
-        # -----------------------------------------------------------------
         st.subheader("📌 1. 下月全盘经营目标")
         t1, t2, t3, t4 = st.columns(4)
         t1.metric("近 30 天实际完成额", f"${last_month_cost:,.2f}")
         t2.metric("下月目标销售额", f"${target_total_cost:,.2f}", delta=f"{growth_rate:+.1f}% 增长")
-        
+
         avg_price_all = sku_recent['Recent_Cost'].sum() / sku_recent['Recent_Units'].sum() if sku_recent['Recent_Units'].sum() > 0 else 0
         target_total_units = target_total_cost / avg_price_all if avg_price_all > 0 else 0
-        
+
         t3.metric("预估需出货总件数", f"{int(target_total_units):,} 件")
         t4.metric("下月日均目标营收", f"${target_total_cost / 30:,.2f} /天")
 
         st.markdown("---")
 
-        # -----------------------------------------------------------------
-        # 2. 算法自动拆解至 SKU
-        # -----------------------------------------------------------------
-        st.subheader("📦 2. 各 SKU 下月预测销量与每日目标件数拆解清单")
-        st.caption("系统已根据每个 SKU 近 30 天的**销售贡献权重**与**件单价**，将总目标精准拆解至各个 SKU：")
+        # 2. 拆解至各 SKU
+        st.subheader("📦 2. 各 SKU 销量目标分解表")
 
-        sku_recent['Sales_Share'] = sku_recent['Recent_Cost'] / last_month_cost if last_month_cost > 0 else 0
-        sku_recent['Target_Cost_Allocated'] = target_total_cost * sku_recent['Sales_Share']
-        
-        sku_recent['Target_Units_Forecast'] = sku_recent.apply(
-            lambda r: r['Target_Cost_Allocated'] / r['Avg_Price'] if r['Avg_Price'] > 0 else 0, axis=1
+        total_weight = sku_recent['Recent_Cost'].sum()
+        sku_recent['Cost_Weight'] = sku_recent['Recent_Cost'] / total_weight if total_weight > 0 else 0
+        sku_recent['Target_Cost'] = target_total_cost * sku_recent['Cost_Weight']
+        sku_recent['Target_Units'] = sku_recent.apply(
+            lambda r: r['Target_Cost'] / r['Avg_Price'] if r['Avg_Price'] > 0 else 0, axis=1
         )
-        sku_recent['Target_Daily_Units'] = sku_recent['Target_Units_Forecast'] / 30
+        sku_recent['Target_Daily_Units'] = sku_recent['Target_Units'] / 30.0
 
-        forecast_df = sku_recent.rename(columns={
+        disp_target = sku_recent.rename(columns={
             sku_col: '产品 SKU',
-            'Recent_Cost': '近30天销售额 ($)',
             'Recent_Units': '近30天销量 (件)',
-            'Active_Daily_Avg': '近30天动销日均 (件/天)',
-            'Avg_Price': '平均件单价 ($)',
-            'Target_Cost_Allocated': '下月目标金额 ($)',
-            'Target_Units_Forecast': '下月预测销量 (件)',
-            'Target_Daily_Units': '下月目标日均 (件/天)'
-        }).sort_values(by='下月目标金额 ($)', ascending=False)
+            'Recent_Cost': '近30天销售额 ($)',
+            'Avg_Price': '历史均价 ($)',
+            'Cost_Weight': '销售额权重 (%)',
+            'Target_Cost': '下月目标销售额 ($)',
+            'Target_Units': '下月目标销量 (件)',
+            'Target_Daily_Units': '下月日均目标件数 (件/天)'
+        }).sort_values(by='下月目标销售额 ($)', ascending=False)
+
+        disp_target['销售额权重 (%)'] = disp_target['销售额权重 (%)'] * 100
 
         st.dataframe(
-            forecast_df[[
-                '产品 SKU', '平均件单价 ($)', '近30天销量 (件)', 
-                '近30天动销日均 (件/天)', '下月预测销量 (件)', 
-                '下月目标日均 (件/天)', '下月目标金额 ($)'
+            disp_target[[
+                '产品 SKU', '历史均价 (\()', '近30天销量 (件)', '近30天销售额 (\))',
+                '销售额权重 (%)', '下月目标销售额 ($)', '下月目标销量 (件)', '下月日均目标件数 (件/天)'
             ]].style.format({
-                '平均件单价 ($)': '${:,.2f}',
+                '历史均价 (\()': '\){:,.2f}',
                 '近30天销量 (件)': '{:,.0f}',
-                '近30天动销日均 (件/天)': '{:,.1f}',
-                '下月预测销量 (件)': '{:,.0f} 件',
-                '下月目标日均 (件/天)': '{:,.1f} 件/天',
-                '下月目标金额 ($)': '${:,.2f}'
-            }),
-            use_container_width=True
+                '近30天销售额 (\()': '\){:,.2f}',
+                '销售额权重 (%)': '{:.2f}%',
+                '下月目标销售额 (\()': '\){:,.2f}',
+                '下月目标销量 (件)': '{:,.0f}',
+                '下月日均目标件数 (件/天)': '{:.1f}'
+            }), use_container_width=True
         )
-
-        st.markdown("---")
-
-        # -----------------------------------------------------------------
-        # 3. 重点 SKU 销量增长对比图
-        # -----------------------------------------------------------------
-        st.subheader("📊 3. 重点 SKU 下月目标销量 vs 近 30 天实际销量对比")
-        top10_forecast = forecast_df.head(10)
-        
-        fig_target = go.Figure()
-        fig_target.add_trace(go.Bar(x=top10_forecast['产品 SKU'], y=top10_forecast['近30天销量 (件)'], name='近 30 天实际销量', marker_color='#93C5FD'))
-        fig_target.add_trace(go.Bar(x=top10_forecast['产品 SKU'], y=top10_forecast['下月预测销量 (件)'], name='下月目标拆解销量', marker_color='#1D4ED8'))
-        fig_target.update_layout(barmode='group', hovermode="x unified", title="TOP 10 重点 SKU 下月拆解目标与历史对比 (件)")
-        st.plotly_chart(fig_target, use_container_width=True)
