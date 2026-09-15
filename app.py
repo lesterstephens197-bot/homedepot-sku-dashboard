@@ -1,2857 +1,623 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import calendar
 
-
-# =========================================================
-# Page Config
-# =========================================================
-
+# 页面基础配置
 st.set_page_config(
-    page_title="THD Sales & SKU Dashboard",
-    page_icon="📊",
-    layout="wide",
+    page_title="Home Depot 销售与广告综合决策看板",
+    page_icon="📊",
+    layout="wide"
 )
 
-
-# =========================================================
-# Common Functions
-# =========================================================
-
-def clean_numeric(series):
-    """Convert currency / percentage / comma-formatted strings to numeric."""
-    if series is None:
-        return pd.Series(dtype=float)
-
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce").fillna(0)
-
-    return (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("$", "", regex=False)
-        .str.replace("%", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .replace({
-            "": np.nan,
-            "nan": np.nan,
-            "None": np.nan,
-            "-": np.nan
-        })
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0)
-    )
-
-
-def find_column(df, candidates):
-    """Find the first matching column."""
-    normalized = {
-        str(c).strip().lower(): c
-        for c in df.columns
-    }
-
-    for candidate in candidates:
-        key = str(candidate).strip().lower()
-
-        if key in normalized:
-            return normalized[key]
-
-    # Fuzzy match
-    for col in df.columns:
-        col_lower = str(col).strip().lower()
-
-        for candidate in candidates:
-            if str(candidate).strip().lower() in col_lower:
-                return col
-
-    return None
-
-
-def read_uploaded_file(uploaded_file):
-    """Read CSV / XLSX / XLS."""
-    try:
-        file_name = uploaded_file.name.lower()
-
-        if file_name.endswith(".csv"):
-            try:
-                return pd.read_csv(uploaded_file)
-            except UnicodeDecodeError:
-                uploaded_file.seek(0)
-                return pd.read_csv(
-                    uploaded_file,
-                    encoding="gbk"
-                )
-
-        if file_name.endswith(".xlsx") or file_name.endswith(".xls"):
-            return pd.read_excel(uploaded_file)
-
-        st.error("请上传 CSV / XLSX / XLS 文件。")
-        return None
-
-    except Exception as e:
-        st.error(f"文件读取失败：{e}")
-        return None
-
-
-def process_sales_data(df):
-    """
-    Standardize sales data.
-
-    Required:
-    - Date
-    - SKU
-    - Units
-
-    Optional:
-    - Sales / Revenue / GMV
-    - Cost
-    - Category
-    - State
-    """
-
-    if df is None or df.empty:
-        return None, "文件为空。"
-
-    df = df.copy()
-
-    df.columns = [
-        str(c).strip()
-        for c in df.columns
-    ]
-
-    # -------------------------
-    # Find columns
-    # -------------------------
-
-    date_col = find_column(
-        df,
-        [
-            "Date",
-            "Order Date",
-            "Sales Date",
-            "Transaction Date",
-            "日期",
-            "订单日期",
-            "销售日期",
-        ],
-    )
-
-    sku_col = find_column(
-        df,
-        [
-            "SKU",
-            "Product SKU",
-            "Merchant SKU",
-            "Vendor SKU",
-            "产品SKU",
-            "商品SKU",
-        ],
-    )
-
-    units_col = find_column(
-        df,
-        [
-            "Units",
-            "Unit",
-            "Qty",
-            "Quantity",
-            "Sales Units",
-            "销量",
-            "销售数量",
-        ],
-    )
-
-    amount_col = find_column(
-        df,
-        [
-            "Sales",
-            "Sales Amount",
-            "Revenue",
-            "GMV",
-            "Net Sales",
-            "Amount",
-            "销售额",
-            "销售金额",
-            "GMV Amount",
-        ],
-    )
-
-    cost_col = find_column(
-        df,
-        [
-            "Cost",
-            "COGS",
-            "Product Cost",
-            "Cost Amount",
-            "成本",
-            "成本金额",
-        ],
-    )
-
-    category_col = find_column(
-        df,
-        [
-            "Category",
-            "Product Category",
-            "Class",
-            "Department",
-            "类目",
-            "品类",
-        ],
-    )
-
-    state_col = find_column(
-        df,
-        [
-            "State",
-            "Ship State",
-            "Shipping State",
-            "州",
-            "州代码",
-        ],
-    )
-
-    # -------------------------
-    # Required validation
-    # -------------------------
-
-    if date_col is None:
-        return (
-            None,
-            "找不到日期列，请确保文件包含 Date / 日期 / Order Date 等字段。"
-        )
-
-    if sku_col is None:
-        return (
-            None,
-            "找不到 SKU 列，请确保文件包含 SKU / Product SKU 等字段。"
-        )
-
-    if units_col is None:
-        return (
-            None,
-            "找不到销量列，请确保文件包含 Units / Qty / Quantity 等字段。"
-        )
-
-    # -------------------------
-    # Standardized dataframe
-    # -------------------------
-
-    out = pd.DataFrame()
-
-    out["Clean_Date"] = pd.to_datetime(
-        df[date_col],
-        errors="coerce"
-    )
-
-    out["Clean_SKU"] = (
-        df[sku_col]
-        .astype(str)
-        .str.strip()
-    )
-
-    out["Clean_Units"] = clean_numeric(
-        df[units_col]
-    )
-
-    if amount_col is not None:
-        out["Clean_Sales"] = clean_numeric(
-            df[amount_col]
-        )
-    else:
-        out["Clean_Sales"] = 0.0
-
-    if cost_col is not None:
-        out["Clean_Cost"] = clean_numeric(
-            df[cost_col]
-        )
-    else:
-        out["Clean_Cost"] = 0.0
-
-    if category_col is not None:
-        out["Clean_Category"] = (
-            df[category_col]
-            .fillna("Unknown")
-            .astype(str)
-            .str.strip()
-        )
-    else:
-        out["Clean_Category"] = "Unknown"
-
-    if state_col is not None:
-        out["Clean_State"] = (
-            df[state_col]
-            .fillna("Unknown")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-    else:
-        out["Clean_State"] = "Unknown"
-
-    # -------------------------
-    # Clean data
-    # -------------------------
-
-    out = out.dropna(
-        subset=["Clean_Date"]
-    )
-
-    out = out[
-        out["Clean_SKU"].notna()
-    ]
-
-    out = out[
-        out["Clean_SKU"].astype(str).str.strip() != ""
-    ]
-
-    out["Clean_Date"] = (
-        out["Clean_Date"]
-        .dt.normalize()
-    )
-
-    return out, None
-
-
-def pct_change(current, previous):
-    if previous == 0:
-
-        if current > 0:
-            return np.nan
-
-        return 0.0
-
-    return (
-        (current - previous)
-        / previous
-        * 100
-    )
-
-
-def pct_label(current, previous):
-
-    if previous == 0:
-
-        if current > 0:
-            return "新增"
-
-        return "—"
-
-    return (
-        f"{pct_change(current, previous):+.1f}%"
-    )
-
-
-def period_sum(
-    df,
-    start_date,
-    end_date
-):
-
-    mask = (
-        (df["Clean_Date"] >= pd.Timestamp(start_date))
-        &
-        (df["Clean_Date"] <= pd.Timestamp(end_date))
-    )
-
-    return (
-        df.loc[mask]
-        .groupby("Clean_SKU")["Clean_Units"]
-        .sum()
-    )
-
-
-def money(value):
-    return f"${value:,.0f}"
-
-
-def number(value):
-    return f"{value:,.0f}"
-
-
-def upload_sales_sidebar(key):
-
-    return st.sidebar.file_uploader(
-        "上传销售数据",
-        type=[
-            "csv",
-            "xlsx",
-            "xls"
-        ],
-        key=key,
-        help="支持 CSV / XLSX / XLS。",
-    )
-
-
-# =========================================================
-# Navigation
-# =========================================================
-
-modules = [
-    "📊 销售与品类管理决策看板",
-    "📅 月度多维度对比与趋势看板",
-    "📈 SKU 7/15天销量变化看板",
-    "📢 SPA 广告绩效诊断与运营看板",
-    "🎯 下月销售目标与 SKU 销量拆解看板",
-]
-
-st.sidebar.title("THD Dashboard")
-
+# -------------------------------------------------------------------------
+# 侧边栏：顶部大模块选择 (功能看板导航)
+# -------------------------------------------------------------------------
+st.sidebar.title("📌 功能看板导航")
 module = st.sidebar.radio(
-    "选择模块",
-    modules
+    "请选择分析模块",
+    [
+        "📊 销售与品类管理决策看板", 
+        "📅 月度多维度对比与趋势看板", 
+        "📢 SPA 广告绩效诊断与运营看板",
+        "🎯 下月销售目标与 SKU 销量拆解看板"
+    ]
 )
 
+st.sidebar.markdown("---")
 
-# =========================================================
-# MODULE 1
-# 销售与品类管理决策看板
-# =========================================================
+# =========================================================================
+# 辅助函数：统一处理销售数据清洗
+# =========================================================================
+def process_sales_data(df_sales):
+    df_sales.columns = df_sales.columns.str.strip()
 
+    date_col = next((c for c in df_sales.columns if c in ['日期', 'Date', 'sales_date']), None)
+    sales_col = next((c for c in df_sales.columns if c in ['销量', 'Units Sold', 'Units', 'Quantity']), None)
+    cost_col = next((c for c in df_sales.columns if c in ['Total Cost', 'Cost', '金额', '总金额']), None)
+    category_col = next((c for c in df_sales.columns if c in ['产品名称', 'Category', '品类', '品类名称']), None)
+    state_col = next((c for c in df_sales.columns if c in ['ShipTo State', 'State', '州', '省份']), None)
+    sku_fields_available = [col for col in ['产品SKU', 'SKU', 'Merchant SKU', 'Vendor SKU', 'OMS ID'] if col in df_sales.columns]
+
+    if not date_col or not sales_col or not sku_fields_available:
+        return None, f"解析失败！未能在表格中识别到必需列（日期、销量或产品SKU列）。当前列为: {list(df_sales.columns)}"
+
+    df_sales['Clean_Date'] = pd.to_datetime(df_sales[date_col])
+    df_sales['Clean_Units'] = pd.to_numeric(df_sales[sales_col], errors='coerce').fillna(0)
+    df_sales['Clean_Cost'] = pd.to_numeric(df_sales[cost_col], errors='coerce').fillna(0) if cost_col else 0
+    df_sales['Clean_Category'] = df_sales[category_col].astype(str).str.strip().replace({'nan': '未分类', 'None': '未分类', '': '未分类'}) if category_col else '未分类'
+    if state_col:
+        df_sales['Clean_State'] = df_sales[state_col].astype(str).str.strip().str.upper().replace({'NAN': '未知', 'NONE': '未知', '': '未知'})
+
+    primary_sku_col = sku_fields_available[0]
+    df_sales['YearMonth'] = df_sales['Clean_Date'].dt.to_period('M').astype(str)
+
+    return (df_sales, primary_sku_col), None
+
+# =========================================================================
+# 模块一：销售与品类管理决策看板 (Sales & Management Dashboard)
+# =========================================================================
 if module == "📊 销售与品类管理决策看板":
-
-    st.title(
-        "📊 销售与品类管理决策看板"
-    )
-
-    st.caption(
-        "用于查看 SKU、品类、区域及销售结构表现。"
-    )
-
-    uploaded_sales_file = upload_sales_sidebar(
-        "sales_module_1"
-    )
-
-    if uploaded_sales_file is None:
-
-        st.info(
-            "请先在左侧上传销售数据。"
-        )
-
-        st.stop()
-
-    raw_sales = read_uploaded_file(
-        uploaded_sales_file
-    )
-
-    df_sales, error = process_sales_data(
-        raw_sales
-    )
-
-    if error:
-
-        st.error(error)
-
-        st.stop()
-
-    min_date = (
-        df_sales["Clean_Date"]
-        .min()
-        .date()
-    )
-
-    max_date = (
-        df_sales["Clean_Date"]
-        .max()
-        .date()
-    )
-
-    st.sidebar.markdown("---")
-
-    start_date = st.sidebar.date_input(
-        "开始日期",
-        value=min_date,
-        min_value=min_date,
-        max_value=max_date,
-        key="m1_start",
-    )
-
-    end_date = st.sidebar.date_input(
-        "结束日期",
-        value=max_date,
-        min_value=min_date,
-        max_value=max_date,
-        key="m1_end",
-    )
-
-    if start_date > end_date:
-
-        st.error(
-            "开始日期不能晚于结束日期。"
-        )
-
-        st.stop()
-
-    period_df = df_sales[
-        (
-            df_sales["Clean_Date"]
-            >= pd.Timestamp(start_date)
-        )
-        &
-        (
-            df_sales["Clean_Date"]
-            <= pd.Timestamp(end_date)
-        )
-    ].copy()
-
-    if period_df.empty:
-
-        st.warning(
-            "所选日期范围没有数据。"
-        )
-
-        st.stop()
-
-    total_sales = (
-        period_df["Clean_Sales"]
-        .sum()
-    )
-
-    total_units = (
-        period_df["Clean_Units"]
-        .sum()
-    )
-
-    sku_count = (
-        period_df["Clean_SKU"]
-        .nunique()
-    )
-
-    avg_price = (
-        total_sales / total_units
-        if total_units
-        else 0
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Sales",
-        money(total_sales)
-    )
-
-    c2.metric(
-        "Units",
-        number(total_units)
-    )
-
-    c3.metric(
-        "Active SKUs",
-        number(sku_count)
-    )
-
-    c4.metric(
-        "Avg. Selling Price",
-        money(avg_price)
-    )
-
-    st.markdown("---")
-
-    sku_summary = (
-        period_df
-        .groupby(
-            "Clean_SKU",
-            as_index=False
-        )
-        .agg(
-            Sales=(
-                "Clean_Sales",
-                "sum"
-            ),
-            Units=(
-                "Clean_Units",
-                "sum"
-            ),
-            Cost=(
-                "Clean_Cost",
-                "sum"
-            ),
-        )
-        .sort_values(
-            "Sales",
-            ascending=False
-        )
-    )
-
-    total_sales_safe = (
-        sku_summary["Sales"].sum()
-    )
-
-    if total_sales_safe:
-
-        sku_summary[
-            "Sales Share (%)"
-        ] = (
-            sku_summary["Sales"]
-            / total_sales_safe
-            * 100
-        )
-
-    else:
-
-        sku_summary[
-            "Sales Share (%)"
-        ] = 0
-
-    sku_summary[
-        "Cumulative Share (%)"
-    ] = (
-        sku_summary["Sales Share (%)"]
-        .cumsum()
-    )
-
-    def abc_class(value):
-
-        if value <= 80:
-            return "A"
-
-        if value <= 95:
-            return "B"
-
-        return "C"
-
-    sku_summary["ABC"] = (
-        sku_summary[
-            "Cumulative Share (%)"
-        ]
-        .apply(abc_class)
-    )
-
-    left, right = st.columns(2)
-
-    with left:
-
-        st.subheader(
-            "Top SKU Sales"
-        )
-
-        top_sku = (
-            sku_summary
-            .head(15)
-            .sort_values("Sales")
-        )
-
-        fig = px.bar(
-            top_sku,
-            x="Sales",
-            y="Clean_SKU",
-            orientation="h",
-            text_auto=".2s",
-        )
-
-        fig.update_layout(
-            height=500,
-            xaxis_title="Sales",
-            yaxis_title="SKU",
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with right:
-
-        st.subheader(
-            "ABC SKU Distribution"
-        )
-
-        abc_count = (
-            sku_summary
-            .groupby("ABC")
-            .size()
-            .reset_index(
-                name="SKU Count"
-            )
-        )
-
-        fig = px.bar(
-            abc_count,
-            x="ABC",
-            y="SKU Count",
-            text_auto=True,
-        )
-
-        fig.update_layout(
-            height=500
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    st.subheader(
-        "SKU Performance"
-    )
-
-    table = sku_summary.copy()
-
-    table["Sales"] = (
-        table["Sales"]
-        .map(lambda x: f"${x:,.0f}")
-    )
-
-    table["Sales Share (%)"] = (
-        table["Sales Share (%)"]
-        .map(lambda x: f"{x:.1f}%")
-    )
-
-    table["Cumulative Share (%)"] = (
-        table["Cumulative Share (%)"]
-        .map(lambda x: f"{x:.1f}%")
-    )
-
-    table["Units"] = (
-        table["Units"]
-        .map(lambda x: f"{x:,.0f}")
-    )
-
-    table["Cost"] = (
-        table["Cost"]
-        .map(lambda x: f"${x:,.0f}")
-    )
-
-    st.dataframe(
-        table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.subheader(
-        "Category / State Overview"
-    )
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-
-        category_summary = (
-            period_df
-            .groupby(
-                "Clean_Category",
-                as_index=False
-            )
-            .agg(
-                Sales=(
-                    "Clean_Sales",
-                    "sum"
-                ),
-                Units=(
-                    "Clean_Units",
-                    "sum"
-                ),
-            )
-            .sort_values(
-                "Sales",
-                ascending=False
-            )
-        )
-
-        fig = px.bar(
-            category_summary.head(15),
-            x="Sales",
-            y="Clean_Category",
-            orientation="h",
-            text_auto=".2s",
-        )
-
-        fig.update_layout(
-            height=450
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with col_b:
-
-        state_summary = (
-            period_df
-            .groupby(
-                "Clean_State",
-                as_index=False
-            )
-            .agg(
-                Sales=(
-                    "Clean_Sales",
-                    "sum"
-                ),
-                Units=(
-                    "Clean_Units",
-                    "sum"
-                ),
-            )
-            .sort_values(
-                "Sales",
-                ascending=False
-            )
-        )
-
-        fig = px.bar(
-            state_summary.head(15),
-            x="Sales",
-            y="Clean_State",
-            orientation="h",
-            text_auto=".2s",
-        )
-
-        fig.update_layout(
-            height=450
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-
-# =========================================================
-# MODULE 2
-# 月度多维度对比与趋势看板
-# =========================================================
-
+    st.title("📊 Home Depot 销售绩效与品类管理决策看板")
+    st.caption("聚焦管理与运营决策：大盘走势、帕累托 ABC 爆款诊断、全美物流布局与动销效率分析")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 销售数据上传")
+    uploaded_sales_file = st.sidebar.file_uploader("上传 Home Depot 销售报表 (CSV/Excel)", type=["csv", "xlsx"], key="sales_uploader")
+
+    if not uploaded_sales_file:
+        st.info("👋 请在侧边栏上传 Excel 或 CSV 格式的 Home Depot 销售报表。")
+    else:
+        try:
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
+        except Exception as e:
+            st.error(f"读取文件失败，请检查文件格式: {e}")
+            st.stop()
+
+        res, err = process_sales_data(df_raw)
+        if err:
+            st.error(err)
+            st.stop()
+
+        df_sales, primary_sku_col = res
+
+        # 时间筛选
+        min_d = df_sales['Clean_Date'].min().date()
+        max_d = df_sales['Clean_Date'].max().date()
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🗓️ 2. 时间范围筛选")
+        date_range = st.sidebar.date_input("分析时间范围", [min_d, max_d], min_value=min_d, max_value=max_d)
+
+        start_date = date_range[0] if len(date_range) >= 1 else min_d
+        end_date = date_range[1] if len(date_range) == 2 else max_d
+
+        time_mask = (df_sales['Clean_Date'].dt.date >= start_date) & (df_sales['Clean_Date'].dt.date <= end_date)
+        filtered_sales = df_sales[time_mask]
+
+        # 1. 管理层高阶 KPI 概览
+        st.subheader("📌 1. 渠道总体经营成果 (Executive Performance)")
+        total_units = filtered_sales['Clean_Units'].sum()
+        total_cost = filtered_sales['Clean_Cost'].sum()
+        total_skus = filtered_sales[primary_sku_col].nunique()
+        avg_order_value = total_cost / total_units if total_units > 0 else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("销售总金额 (Total Cost)", f"${total_cost:,.2f}")
+        c2.metric("销售总出货量 (Units)", f"{int(total_units):,} 件")
+        c3.metric("均价 / 件单价 (ASP)", f"${avg_order_value:.2f}")
+        c4.metric("活跃动销 SKU 数", f"{total_skus} 款")
+
+        st.markdown("---")
+
+        # 2. ABC 帕累托诊断与 SKU 动销效率全景表
+        st.subheader("🏆 2. 产品结构 ABC 帕累托诊断与 SKU 动销效率全景表")
+        st.caption("A 类：贡献前 80% 销售额的核心爆款 | B 类：贡献 80%-95% 的腰部主力款 | C 类：贡献最后 5% 的尾部/滞销款")
+
+        active_sales = filtered_sales[filtered_sales['Clean_Units'] > 0]
+
+        sku_summary = filtered_sales.groupby(primary_sku_col).agg({
+            'Clean_Cost': 'sum',
+            'Clean_Units': 'sum',
+        }).reset_index()
+
+        active_metrics = active_sales.groupby(primary_sku_col).agg({
+            'Clean_Date': ['nunique', 'min', 'max']
+        }).reset_index()
+        active_metrics.columns = [primary_sku_col, 'Active_Days', 'First_Sale', 'Last_Sale']
+
+        sku_summary = pd.merge(sku_summary, active_metrics, on=primary_sku_col, how='left')
+        sku_summary['Active_Days'] = sku_summary['Active_Days'].fillna(0)
+
+        sku_summary['Active_Daily_Avg'] = sku_summary.apply(
+            lambda row: row['Clean_Units'] / row['Active_Days'] if row['Active_Days'] > 0 else 0, axis=1
+        )
+
+        sku_summary = sku_summary.sort_values(by='Clean_Cost', ascending=False).reset_index(drop=True)
+
+        sku_summary['Cumulative_Cost'] = sku_summary['Clean_Cost'].cumsum()
+        sku_summary['Cost_Share (%)'] = (sku_summary['Clean_Cost'] / total_cost) * 100 if total_cost > 0 else 0
+        sku_summary['Cumulative_Share (%)'] = (sku_summary['Cumulative_Cost'] / total_cost) * 100 if total_cost > 0 else 0
+
+        def assign_abc(pct):
+            if pct <= 80: return 'A 类 (核心爆款)'
+            elif pct <= 95: return 'B 类 (腰部主力)'
+            else: return 'C 类 (尾部/滞销)'
+
+        sku_summary['ABC_Class'] = sku_summary['Cumulative_Share (%)'].apply(assign_abc)
+        abc_counts = sku_summary['ABC_Class'].value_counts()
+
+        col_abc1, col_abc2 = st.columns([1, 1])
+        with col_abc1:
+            fig_abc = px.pie(
+                sku_summary, values='Clean_Cost', names='ABC_Class', title="ABC 分级销售额占比构成", hole=0.4,
+                color='ABC_Class', color_discrete_map={'A 类 (核心爆款)': '#10B981', 'B 类 (腰部主力)': '#F59E0B', 'C 类 (尾部/滞销)': '#EF4444'}
+            )
+            fig_abc.update_traces(textinfo='percent+label')
+            st.plotly_chart(fig_abc, use_container_width=True)
+
+        with col_abc2:
+            st.markdown("### 💡 帕累托品类优化诊断建议")
+            a_count = abc_counts.get('A 类 (核心爆款)', 0)
+            b_count = abc_counts.get('B 类 (腰部主力)', 0)
+            c_count = abc_counts.get('C 类 (尾部/滞销)', 0)
+            st.success(f"🟢 **A 类核心爆款 ({a_count} 款 SKU)**：贡献全盘 **80%** 营收！重点监控库存与供应链。")
+            st.warning(f"🟡 **B 类腰部潜力 ({b_count} 款 SKU)**：贡献 **15%** 营收，可适当增加广告投放。")
+            st.error(f"🔴 **C 类尾部滞销 ({c_count} 款 SKU)**：仅贡献 **5%** 营收，评估是否清仓。")
+
+        st.markdown("### 📋 各分类 SKU 详细名单与动销效率列表")
+        df_a = sku_summary[sku_summary['ABC_Class'] == 'A 类 (核心爆款)'].copy()
+        df_b = sku_summary[sku_summary['ABC_Class'] == 'B 类 (腰部主力)'].copy()
+        df_c = sku_summary[sku_summary['ABC_Class'] == 'C 类 (尾部/滞销)'].copy()
+
+        tab_a, tab_b, tab_c, tab_all = st.tabs([
+            f"🟢 A 类核心爆款 ({len(df_a)} 款)", f"🟡 B 类腰部潜力 ({len(df_b)} 款)", 
+            f"🔴 C 类尾部滞销 ({len(df_c)} 款)", f"📊 全量 SKU 动销效率排行榜 ({len(sku_summary)} 款)"
+        ])
+
+        def render_sku_table(df_subset):
+            display_df = df_subset.rename(columns={
+                primary_sku_col: '产品 SKU', 'Clean_Cost': '销售总额 ($)', 'Clean_Units': '销售总量 (件)',
+                'Cost_Share (%)': '销售额占比 (%)', 'Cumulative_Share (%)': '累计占比 (%)',
+                'Active_Days': '可动销天数 (天)', 'Active_Daily_Avg': '动销日均销量 (件/天)',
+                'First_Sale': '首次出单日期', 'Last_Sale': '最近出单日期'
+            }).copy()
+            display_df['首次出单日期'] = pd.to_datetime(display_df['首次出单日期']).dt.strftime('%Y-%m-%d').fillna('无出单')
+            display_df['最近出单日期'] = pd.to_datetime(display_df['最近出单日期']).dt.strftime('%Y-%m-%d').fillna('无出单')
+
+            st.dataframe(
+                display_df[[
+                    '产品 SKU', '销售总额 ($)', '销售总量 (件)', '可动销天数 (天)', 
+                    '动销日均销量 (件/天)', '销售额占比 (%)', '累计占比 (%)', '首次出单日期', '最近出单日期'
+                ]].style.format({
+                    '销售总额 ($)': '${:,.2f}', '销售总量 (件)': '{:,.0f}', '可动销天数 (天)': '{:,.0f} 天',
+                    '动销日均销量 (件/天)': '{:,.1f} 件/天', '销售额占比 (%)': '{:.2f}%', '累计占比 (%)': '{:.2f}%'
+                }), use_container_width=True
+            )
+
+        with tab_a: render_sku_table(df_a)
+        with tab_b: render_sku_table(df_b)
+        with tab_c: render_sku_table(df_c)
+        with tab_all: render_sku_table(sku_summary)
+
+        st.markdown("---")
+
+        # 3. 细分视角分析
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🔍 3. 运营分析视角")
+        view_mode = st.sidebar.radio("选择细分视角", ["📦 单产品 SKU 动销深度分析", "🗺️ 全美物流仓储与地理分布", "🏷️ 品类占比与结构分析"])
+
+        if view_mode == "📦 单产品 SKU 动销深度分析":
+            st.subheader("📦 单产品 SKU 动销效率与日均走势")
+            selected_sku = st.sidebar.selectbox(f"选择 {primary_sku_col}", sku_summary[primary_sku_col].unique())
+            sku_df = filtered_sales[filtered_sales[primary_sku_col].astype(str) == str(selected_sku)].sort_values('Clean_Date')
+
+            if not sku_df.empty:
+                total_sku_units = sku_df['Clean_Units'].sum()
+                total_sku_cost = sku_df['Clean_Cost'].sum()
+                daily_summary = sku_df.groupby('Clean_Date').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
+
+                total_range_days = (end_date - start_date).days + 1
+                active_days = len(daily_summary[daily_summary['Clean_Units'] > 0])
+                overall_avg = total_sku_units / total_range_days if total_range_days > 0 else 0
+                active_avg = total_sku_units / active_days if active_days > 0 else 0
+                active_rate = (active_days / total_range_days) * 100 if total_range_days > 0 else 0
+
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("区间总销量", f"{int(total_sku_units):,} 件")
+                s2.metric("区间总金额", f"${total_sku_cost:,.2f}")
+                s3.metric("动销率", f"{active_rate:.1f}%")
+                s4.metric("动销日均销量", f"{active_avg:.1f} 件/天", delta=f"自然日均: {overall_avg:.1f}")
+
+                fig_sku_trend = go.Figure()
+                fig_sku_trend.add_trace(go.Bar(x=daily_summary['Clean_Date'], y=daily_summary['Clean_Units'], name='销量 (件)', marker_color='#3B82F6'))
+                fig_sku_trend.add_trace(go.Scatter(x=daily_summary['Clean_Date'], y=daily_summary['Clean_Cost'], name='金额 ($)', yaxis='y2', line=dict(color='#10B981', width=2.5)))
+                fig_sku_trend.update_layout(title=f"SKU: {selected_sku} - 每日销量与金额趋势", hovermode="x unified", yaxis=dict(title="销量 (件)"), yaxis2=dict(title="金额 ($)", overlaying='y', side='right'))
+                st.plotly_chart(fig_sku_trend, use_container_width=True)
+
+        elif view_mode == "🗺️ 全美物流仓储与地理分布":
+            st.subheader("🗺️ 全美各州销量热力分布")
+            if 'Clean_State' in filtered_sales.columns:
+                state_df = filtered_sales.groupby('Clean_State').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum'}).reset_index()
+                state_df['Share_Pct'] = (state_df['Clean_Units'] / total_units) * 100 if total_units > 0 else 0
+                state_df = state_df.sort_values(by='Clean_Units', ascending=False)
+
+                m1, m2 = st.columns([2, 1])
+                with m1:
+                    fig_map = px.choropleth(state_df, locations='Clean_State', locationmode="USA-states", color='Clean_Units', scope="usa", color_continuous_scale="Viridis", title="美国各州出货量热力图")
+                    st.plotly_chart(fig_map, use_container_width=True)
+                with m2:
+                    st.markdown("### 🏆 Top 10 销量集中州")
+                    st.dataframe(state_df.head(10).rename(columns={'Clean_State': '州', 'Clean_Units': '销量', 'Clean_Cost': '销售额', 'Share_Pct': '占比 (%)'}), use_container_width=True)
+
+        else:
+            st.subheader("🏷️ 产品品类 (Category) 销售结构分析")
+            cat_df = filtered_sales.groupby('Clean_Category').agg({'Clean_Units': 'sum', 'Clean_Cost': 'sum', primary_sku_col: 'nunique'}).reset_index().sort_values(by='Clean_Cost', ascending=False)
+            fig_cat = px.bar(cat_df, x='Clean_Category', y='Clean_Cost', text='Clean_Cost', color='Clean_Units', title="各品类销售额与出货件数表现")
+            fig_cat.update_traces(texttemplate='$%{text:,.0f}', textposition='outside')
+            st.plotly_chart(fig_cat, use_container_width=True)
+
+# =========================================================================
+# 模块二：月度多维度对比与趋势看板 (动销日均上升 & 下降诊断看板)
+# =========================================================================
 elif module == "📅 月度多维度对比与趋势看板":
-
-    st.title(
-        "📅 月度多维度对比与趋势看板"
-    )
-
-    st.caption(
-        "按月份查看销售额、销量和 SKU 趋势。"
-    )
-
-    uploaded_sales_file = upload_sales_sidebar(
-        "sales_module_2"
-    )
-
-    if uploaded_sales_file is None:
-
-        st.info(
-            "请先在左侧上传销售数据。"
-        )
-
-        st.stop()
-
-    raw_sales = read_uploaded_file(
-        uploaded_sales_file
-    )
-
-    df_sales, error = process_sales_data(
-        raw_sales
-    )
-
-    if error:
-
-        st.error(error)
-
-        st.stop()
-
-    df_sales["Month"] = (
-        df_sales["Clean_Date"]
-        .dt.to_period("M")
-        .astype(str)
-    )
-
-    months = sorted(
-        df_sales["Month"].unique()
-    )
-
-    if not months:
-
-        st.warning(
-            "没有有效月份数据。"
-        )
-
-        st.stop()
-
-    st.sidebar.markdown("---")
-
-    selected_months = st.sidebar.multiselect(
-        "选择月份",
-        options=months,
-        default=months[
-            -min(6, len(months)):
-        ],
-        key="m2_months",
-    )
-
-    if not selected_months:
-
-        st.warning(
-            "请至少选择一个月份。"
-        )
-
-        st.stop()
-
-    month_df = df_sales[
-        df_sales["Month"].isin(
-            selected_months
-        )
-    ].copy()
-
-    monthly = (
-        month_df
-        .groupby(
-            "Month",
-            as_index=False
-        )
-        .agg(
-            Sales=(
-                "Clean_Sales",
-                "sum"
-            ),
-            Units=(
-                "Clean_Units",
-                "sum"
-            ),
-            Active_SKU=(
-                "Clean_SKU",
-                "nunique"
-            ),
-        )
-    )
-
-    monthly["Month"] = pd.Categorical(
-        monthly["Month"],
-        categories=selected_months,
-        ordered=True,
-    )
-
-    monthly = monthly.sort_values(
-        "Month"
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Selected Sales",
-        money(
-            monthly["Sales"].sum()
-        )
-    )
-
-    c2.metric(
-        "Selected Units",
-        number(
-            monthly["Units"].sum()
-        )
-    )
-
-    c3.metric(
-        "Avg. Active SKUs",
-        f"{monthly['Active_SKU'].mean():,.0f}"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        fig = px.line(
-            monthly,
-            x="Month",
-            y="Sales",
-            markers=True,
-            text="Sales",
-        )
-
-        fig.update_traces(
-            texttemplate="$%{text:,.0f}",
-            textposition="top center"
-        )
-
-        fig.update_layout(
-            height=450,
-            yaxis_title="Sales"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with col2:
-
-        fig = px.line(
-            monthly,
-            x="Month",
-            y="Units",
-            markers=True,
-            text="Units",
-        )
-
-        fig.update_traces(
-            texttemplate="%{text:,.0f}",
-            textposition="top center"
-        )
-
-        fig.update_layout(
-            height=450,
-            yaxis_title="Units"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    st.subheader(
-        "Monthly Summary"
-    )
-
-    monthly_display = monthly.copy()
-
-    monthly_display["Sales"] = (
-        monthly_display["Sales"]
-        .map(lambda x: f"${x:,.0f}")
-    )
-
-    monthly_display["Units"] = (
-        monthly_display["Units"]
-        .map(lambda x: f"{x:,.0f}")
-    )
-
-    st.dataframe(
-        monthly_display,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.subheader(
-        "SKU Monthly Sales"
-    )
-
-    sku_monthly = (
-        month_df
-        .groupby(
-            ["Clean_SKU", "Month"],
-            as_index=False
-        )
-        .agg(
-            Sales=(
-                "Clean_Sales",
-                "sum"
-            ),
-            Units=(
-                "Clean_Units",
-                "sum"
-            ),
-        )
-    )
-
-    sku_pivot = sku_monthly.pivot(
-        index="Clean_SKU",
-        columns="Month",
-        values="Sales",
-    ).fillna(0)
-
-    sku_pivot = sku_pivot.reindex(
-        columns=selected_months,
-        fill_value=0
-    )
-
-    sku_pivot["Total Sales"] = (
-        sku_pivot.sum(axis=1)
-    )
-
-    sku_pivot = sku_pivot.sort_values(
-        "Total Sales",
-        ascending=False
-    )
-
-    display_pivot = sku_pivot.copy()
-
-    for col in display_pivot.columns:
-
-        display_pivot[col] = (
-            display_pivot[col]
-            .map(lambda x: f"${x:,.0f}")
-        )
-
-    st.dataframe(
-        display_pivot,
-        use_container_width=True
-    )
-
-    top_skus = (
-        sku_pivot
-        .head(10)
-        .drop(
-            columns="Total Sales"
-        )
-    )
-
-    if not top_skus.empty:
-
-        fig = px.line(
-            top_skus.T,
-            markers=True,
-        )
-
-        fig.update_layout(
-            height=500,
-            xaxis_title="Month",
-            yaxis_title="Sales",
-            legend_title="SKU",
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-
-# =========================================================
-# MODULE 3
-# SKU 7/15天销量变化看板
-# =========================================================
-
-elif module == "📈 SKU 7/15天销量变化看板":
-
-    st.title(
-        "📈 SKU 7/15天销量变化看板"
-    )
-
-    st.caption(
-        "比较每个 SKU 最近 7 天 vs 前 7 天、最近 15 天 vs 前 15 天的销量变化。"
-    )
-
-    uploaded_sales_file = upload_sales_sidebar(
-        "sales_module_3"
-    )
-
-    if uploaded_sales_file is None:
-
-        st.info(
-            "请先在左侧上传销售数据。"
-        )
-
-        st.stop()
-
-    raw_sales = read_uploaded_file(
-        uploaded_sales_file
-    )
-
-    df_sales, error = process_sales_data(
-        raw_sales
-    )
-
-    if error:
-
-        st.error(error)
-
-        st.stop()
-
-    min_date = (
-        df_sales["Clean_Date"]
-        .min()
-        .date()
-    )
-
-    max_date = (
-        df_sales["Clean_Date"]
-        .max()
-        .date()
-    )
-
-    st.sidebar.markdown("---")
-
-    # -------------------------
-    # Date
-    # -------------------------
-
-    anchor_date = st.sidebar.date_input(
-        "统计截止日期",
-        value=max_date,
-        min_value=min_date,
-        max_value=max_date,
-        key="m3_anchor",
-        help="默认使用销售数据中的最新日期。",
-    )
-
-    # -------------------------
-    # Filters
-    # -------------------------
-
-    min_7_units = st.sidebar.number_input(
-        "最小最近7天销量",
-        min_value=0,
-        value=0,
-        step=1,
-        key="m3_min_units",
-        help="设为 0 表示显示全部 SKU。",
-    )
-
-    trend_filter = st.sidebar.selectbox(
-        "趋势筛选",
-        [
-            "全部 SKU",
-            "持续上升",
-            "持续下滑",
-            "近期回升",
-            "近期走弱",
-            "基本持平",
-        ],
-        key="m3_trend",
-    )
-
-    sku_keyword = st.sidebar.text_input(
-        "SKU 搜索",
-        value="",
-        key="m3_sku_search",
-    ).strip()
-
-    # -------------------------
-    # Period Definition
-    # -------------------------
-
-    anchor = pd.Timestamp(
-        anchor_date
-    )
-
-    # 最近7天
-    cur7_start = (
-        anchor
-        - pd.Timedelta(days=6)
-    )
-
-    cur7_end = anchor
-
-    # 前7天
-    prev7_start = (
-        anchor
-        - pd.Timedelta(days=13)
-    )
-
-    prev7_end = (
-        anchor
-        - pd.Timedelta(days=7)
-    )
-
-    # 最近15天
-    cur15_start = (
-        anchor
-        - pd.Timedelta(days=14)
-    )
-
-    cur15_end = anchor
-
-    # 前15天
-    prev15_start = (
-        anchor
-        - pd.Timedelta(days=29)
-    )
-
-    prev15_end = (
-        anchor
-        - pd.Timedelta(days=15)
-    )
-
-    # -------------------------
-    # All SKU
-    # -------------------------
-
-    all_skus = pd.Index(
-        df_sales[
-            "Clean_SKU"
-        ]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique(),
-        name="Clean_SKU",
-    )
-
-    # -------------------------
-    # Period Sales
-    # -------------------------
-
-    cur7 = (
-        period_sum(
-            df_sales,
-            cur7_start,
-            cur7_end
-        )
-        .reindex(
-            all_skus,
-            fill_value=0
-        )
-    )
-
-    prev7 = (
-        period_sum(
-            df_sales,
-            prev7_start,
-            prev7_end
-        )
-        .reindex(
-            all_skus,
-            fill_value=0
-        )
-    )
-
-    cur15 = (
-        period_sum(
-            df_sales,
-            cur15_start,
-            cur15_end
-        )
-        .reindex(
-            all_skus,
-            fill_value=0
-        )
-    )
-
-    prev15 = (
-        period_sum(
-            df_sales,
-            prev15_start,
-            prev15_end
-        )
-        .reindex(
-            all_skus,
-            fill_value=0
-        )
-    )
-
-    # -------------------------
-    # Summary Table
-    # -------------------------
-
-    summary = pd.DataFrame(
-        {
-            "SKU": all_skus,
-            "最近7天销量": cur7.values,
-            "前7天销量": prev7.values,
-            "最近15天销量": cur15.values,
-            "前15天销量": prev15.values,
-        }
-    )
-
-    summary["7天变化"] = (
-        summary["最近7天销量"]
-        -
-        summary["前7天销量"]
-    )
-
-    summary["15天变化"] = (
-        summary["最近15天销量"]
-        -
-        summary["前15天销量"]
-    )
-
-    summary["7天变化率数值"] = [
-        pct_change(
-            current,
-            previous
-        )
-        for current, previous
-        in zip(
-            summary["最近7天销量"],
-            summary["前7天销量"]
-        )
-    ]
-
-    summary["15天变化率数值"] = [
-        pct_change(
-            current,
-            previous
-        )
-        for current, previous
-        in zip(
-            summary["最近15天销量"],
-            summary["前15天销量"]
-        )
-    ]
-
-    summary["7天变化率"] = [
-        pct_label(
-            current,
-            previous
-        )
-        for current, previous
-        in zip(
-            summary["最近7天销量"],
-            summary["前7天销量"]
-        )
-    ]
-
-    summary["15天变化率"] = [
-        pct_label(
-            current,
-            previous
-        )
-        for current, previous
-        in zip(
-            summary["最近15天销量"],
-            summary["前15天销量"]
-        )
-    ]
-
-    # -------------------------
-    # Trend Classification
-    # -------------------------
-
-    def get_trend(row):
-
-        d7 = row["7天变化"]
-        d15 = row["15天变化"]
-
-        if d7 > 0 and d15 > 0:
-            return "持续上升"
-
-        if d7 < 0 and d15 < 0:
-            return "持续下滑"
-
-        if d7 > 0 and d15 < 0:
-            return "近期回升"
-
-        if d7 < 0 and d15 > 0:
-            return "近期走弱"
-
-        return "基本持平"
-
-    summary["趋势"] = (
-        summary
-        .apply(
-            get_trend,
-            axis=1
-        )
-    )
-
-    # -------------------------
-    # Filters
-    # -------------------------
-
-    filtered = summary[
-        summary["最近7天销量"]
-        >= min_7_units
-    ].copy()
-
-    if sku_keyword:
-
-        filtered = filtered[
-            filtered["SKU"].str.contains(
-                sku_keyword,
-                case=False,
-                na=False
-            )
-        ]
-
-    if trend_filter != "全部 SKU":
-
-        filtered = filtered[
-            filtered["趋势"]
-            == trend_filter
-        ]
-
-    # -------------------------
-    # KPI
-    # -------------------------
-
-    total_cur7 = (
-        summary["最近7天销量"]
-        .sum()
-    )
-
-    total_prev7 = (
-        summary["前7天销量"]
-        .sum()
-    )
-
-    total_cur15 = (
-        summary["最近15天销量"]
-        .sum()
-    )
-
-    total_prev15 = (
-        summary["前15天销量"]
-        .sum()
-    )
-
-    total_7_pct = pct_change(
-        total_cur7,
-        total_prev7
-    )
-
-    total_15_pct = pct_change(
-        total_cur15,
-        total_prev15
-    )
-
-    rising = (
-        summary["7天变化"] > 0
-    ).sum()
-
-    falling = (
-        summary["7天变化"] < 0
-    ).sum()
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-
-    k1.metric(
-        "统计截止日",
-        anchor.strftime("%Y-%m-%d")
-    )
-
-    k2.metric(
-        "最近7天销量",
-        f"{total_cur7:,.0f}",
-        (
-            f"{total_7_pct:+.1f}%"
-            if not pd.isna(total_7_pct)
-            else "新增"
-        )
-    )
-
-    k3.metric(
-        "最近15天销量",
-        f"{total_cur15:,.0f}",
-        (
-            f"{total_15_pct:+.1f}%"
-            if not pd.isna(total_15_pct)
-            else "新增"
-        )
-    )
-
-    k4.metric(
-        "7天上升 SKU",
-        f"{rising:,}"
-    )
-
-    k5.metric(
-        "7天下降 SKU",
-        f"{falling:,}"
-    )
-
-    st.markdown("---")
-
-    st.info(
-        f"最近7天："
-        f"{cur7_start.strftime('%m/%d')}"
-        f"–"
-        f"{cur7_end.strftime('%m/%d')}"
-        f"  |  前7天："
-        f"{prev7_start.strftime('%m/%d')}"
-        f"–"
-        f"{prev7_end.strftime('%m/%d')}"
-        f"  |  最近15天："
-        f"{cur15_start.strftime('%m/%d')}"
-        f"–"
-        f"{cur15_end.strftime('%m/%d')}"
-        f"  |  前15天："
-        f"{prev15_start.strftime('%m/%d')}"
-        f"–"
-        f"{prev15_end.strftime('%m/%d')}"
-    )
-
-    # =====================================================
-    # Trend Distribution
-    # =====================================================
-
-    trend_count = (
-        summary["趋势"]
-        .value_counts()
-        .reindex(
-            [
-                "持续上升",
-                "近期回升",
-                "基本持平",
-                "近期走弱",
-                "持续下滑",
-            ],
-            fill_value=0
-        )
-        .reset_index()
-    )
-
-    trend_count.columns = [
-        "趋势",
-        "SKU数量"
-    ]
-
-    left, right = st.columns(2)
-
-    with left:
-
-        st.subheader(
-            "SKU 趋势分布"
-        )
-
-        fig = px.bar(
-            trend_count,
-            x="趋势",
-            y="SKU数量",
-            text_auto=True,
-        )
-
-        fig.update_layout(
-            height=420
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with right:
-
-        st.subheader(
-            "7天变化 vs 15天变化"
-        )
-
-        scatter_df = summary.copy()
-
-        fig = px.scatter(
-            scatter_df,
-            x="7天变化",
-            y="15天变化",
-            hover_name="SKU",
-            hover_data=[
-                "最近7天销量",
-                "最近15天销量",
-                "趋势",
-            ],
-        )
-
-        fig.add_hline(
-            y=0,
-            line_dash="dash"
-        )
-
-        fig.add_vline(
-            x=0,
-            line_dash="dash"
-        )
-
-        fig.update_layout(
-            height=420,
-            xaxis_title="7天销量变化",
-            yaxis_title="15天销量变化",
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    # =====================================================
-    # Top Increase / Decrease
-    # =====================================================
-
-    left, right = st.columns(2)
-
-    with left:
-
-        st.subheader(
-            "Top 10：最近7天销量增长"
-        )
-
-        top_up = (
-            summary
-            .sort_values(
-                "7天变化",
-                ascending=False
-            )
-            .head(10)
-            .sort_values(
-                "7天变化"
-            )
-        )
-
-        fig = px.bar(
-            top_up,
-            x="7天变化",
-            y="SKU",
-            orientation="h",
-            text_auto=True,
-        )
-
-        fig.update_layout(
-            height=450
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with right:
-
-        st.subheader(
-            "Top 10：最近7天销量下降"
-        )
-
-        top_down = (
-            summary
-            .sort_values(
-                "7天变化",
-                ascending=True
-            )
-            .head(10)
-            .sort_values(
-                "7天变化",
-                ascending=True
-            )
-        )
-
-        fig = px.bar(
-            top_down,
-            x="7天变化",
-            y="SKU",
-            orientation="h",
-            text_auto=True,
-        )
-
-        fig.update_layout(
-            height=450
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    # =====================================================
-    # Main SKU Table
-    # =====================================================
-
-    st.subheader(
-        "SKU 7天 / 15天销量变化明细"
-    )
-
-    table = filtered[
-        [
-            "SKU",
-            "最近7天销量",
-            "前7天销量",
-            "7天变化",
-            "7天变化率",
-            "最近15天销量",
-            "前15天销量",
-            "15天变化",
-            "15天变化率",
-            "趋势",
-        ]
-    ].copy()
-
-    table = table.sort_values(
-        [
-            "7天变化",
-            "最近7天销量"
-        ],
-        ascending=[
-            False,
-            False
-        ]
-    )
-
-    table_display = table.copy()
-
-    for col in [
-        "最近7天销量",
-        "前7天销量",
-        "7天变化",
-        "最近15天销量",
-        "前15天销量",
-        "15天变化",
-    ]:
-
-        table_display[col] = (
-            table_display[col]
-            .map(
-                lambda x:
-                f"{x:,.0f}"
-            )
-        )
-
-    st.dataframe(
-        table_display,
-        use_container_width=True,
-        hide_index=True,
-        height=600,
-    )
-
-    # =====================================================
-    # Download
-    # =====================================================
-
-    csv_data = (
-        table
-        .to_csv(index=False)
-        .encode("utf-8-sig")
-    )
-
-    st.download_button(
-        "下载 SKU 7/15天销量变化明细 CSV",
-        data=csv_data,
-        file_name=(
-            "SKU_7_15_day_sales_change_"
-            f"{anchor.strftime('%Y%m%d')}.csv"
-        ),
-        mime="text/csv",
-    )
-
-    # =====================================================
-    # SKU Detail
-    # =====================================================
-
-    st.markdown("---")
-
-    st.subheader(
-        "SKU 单品趋势详情"
-    )
-
-    if len(filtered) > 0:
-
-        sku_options = (
-            filtered["SKU"]
-            .tolist()
-        )
-
-        selected_sku = st.selectbox(
-            "选择 SKU",
-            sku_options,
-            key="m3_selected_sku",
-        )
-
-        sku_daily = (
-            df_sales[
-                df_sales["Clean_SKU"]
-                == selected_sku
-            ]
-            .groupby(
-                "Clean_Date"
-            )["Clean_Units"]
-            .sum()
-        )
-
-        detail_start = (
-            anchor
-            - pd.Timedelta(days=29)
-        )
-
-        date_index = pd.date_range(
-            start=detail_start,
-            end=anchor,
-            freq="D"
-        )
-
-        sku_daily = (
-            sku_daily
-            .reindex(
-                date_index,
-                fill_value=0
-            )
-        )
-
-        sku_daily_df = (
-            sku_daily
-            .rename("Units")
-            .reset_index()
-        )
-
-        sku_daily_df.columns = [
-            "Date",
-            "Units"
-        ]
-
-        sku_daily_df[
-            "7D Rolling Avg"
-        ] = (
-            sku_daily_df["Units"]
-            .rolling(7)
-            .mean()
-        )
-
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Bar(
-                x=sku_daily_df["Date"],
-                y=sku_daily_df["Units"],
-                name="Daily Units",
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=sku_daily_df["Date"],
-                y=sku_daily_df[
-                    "7D Rolling Avg"
-                ],
-                mode="lines",
-                name="7D Rolling Avg",
-            )
-        )
-
-        fig.add_vrect(
-            x0=cur7_start,
-            x1=cur7_end
-            + pd.Timedelta(days=1),
-            opacity=0.15,
-            line_width=0,
-            annotation_text="Recent 7D",
-            annotation_position="top left",
-        )
-
-        fig.update_layout(
-            height=500,
-            xaxis_title="Date",
-            yaxis_title="Units",
-            hovermode="x unified",
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-        detail_row = (
-            summary[
-                summary["SKU"]
-                == selected_sku
-            ]
-            .iloc[0]
-        )
-
-        d1, d2, d3, d4 = st.columns(4)
-
-        d1.metric(
-            "最近7天",
-            f"{detail_row['最近7天销量']:,.0f}",
-            detail_row["7天变化率"]
-        )
-
-        d2.metric(
-            "前7天",
-            f"{detail_row['前7天销量']:,.0f}"
-        )
-
-        d3.metric(
-            "最近15天",
-            f"{detail_row['最近15天销量']:,.0f}",
-            detail_row["15天变化率"]
-        )
-
-        d4.metric(
-            "趋势",
-            detail_row["趋势"]
-        )
-
-    else:
-
-        st.warning(
-            "当前筛选条件下没有 SKU。"
-        )
-
-
-# =========================================================
-# MODULE 4
-# SPA 广告绩效诊断与运营看板
-# =========================================================
-
+    st.title("📅 月度多维度对比与动销日均升降幅诊断看板")
+    st.caption("聚焦动销效率：精准对比各个 SKU 在不同月份的『动销日均销量』升降幅度，自动排查上升爆款与下滑风险款")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 销售数据上传")
+    uploaded_sales_file = st.sidebar.file_uploader("上传销售报表 (CSV/Excel)", type=["csv", "xlsx"], key="monthly_uploader")
+
+    if not uploaded_sales_file:
+        st.info("👋 请在侧边栏上传 Excel 或 CSV 格式的销售报表以开启月度对比。")
+    else:
+        try:
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
+        except Exception as e:
+            st.error(f"读取文件失败: {e}"); st.stop()
+
+        res, err = process_sales_data(df_raw)
+        if err: st.error(err); st.stop()
+        df_sales, primary_sku_col = res
+
+        # 月份选择
+        all_months = sorted(df_sales['YearMonth'].unique())
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🗓️ 2. 对比月份设定")
+        selected_months = st.sidebar.multiselect("选择要对比的月份 (建议选2个月以上)", all_months, default=all_months)
+
+        if not selected_months:
+            st.warning("请在侧边栏至少选择一个月份！")
+            st.stop()
+
+        m_sales = df_sales[df_sales['YearMonth'].isin(selected_months)]
+
+        # 1. 动销日均与基础月度数据计算
+        active_m_sales = m_sales[m_sales['Clean_Units'] > 0]
+        active_days_df = active_m_sales.groupby([primary_sku_col, 'YearMonth'])['Clean_Date'].nunique().reset_index()
+        active_days_df.rename(columns={'Clean_Date': 'Active_Days'}, inplace=True)
+
+        sku_monthly_df = m_sales.groupby([primary_sku_col, 'YearMonth']).agg(
+            Monthly_Units=('Clean_Units', 'sum'),
+            Monthly_Cost=('Clean_Cost', 'sum')
+        ).reset_index()
+
+        sku_monthly_df = pd.merge(sku_monthly_df, active_days_df, on=[primary_sku_col, 'YearMonth'], how='left')
+        sku_monthly_df['Active_Days'] = sku_monthly_df['Active_Days'].fillna(0)
+
+        def get_days_in_month(ym_str):
+            try:
+                year, month = map(int, ym_str.split('-'))
+                return calendar.monthrange(year, month)[1]
+            except:
+                return 30
+
+        sku_monthly_df['Days_In_Month'] = sku_monthly_df['YearMonth'].apply(get_days_in_month)
+        sku_monthly_df['Active_Daily_Avg'] = sku_monthly_df.apply(
+            lambda r: r['Monthly_Units'] / r['Active_Days'] if r['Active_Days'] > 0 else 0, axis=1
+        )
+
+        # -----------------------------------------------------------------
+        # 🚀 核心部分：动销日均（Active Daily Avg）升降幅推演 (针对最近两个已选月份)
+        # -----------------------------------------------------------------
+        sorted_sel_months = sorted(selected_months)
+        has_comparison = len(sorted_sel_months) >= 2
+
+        if has_comparison:
+            latest_m = sorted_sel_months[-1]
+            prev_m = sorted_sel_months[-2]
+
+            # 提取透视表
+            avg_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
+            units_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Monthly_Units').fillna(0)
+            days_pivot = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Days').fillna(0)
+
+            comp_df = pd.DataFrame(index=avg_pivot.index)
+            comp_df['Prev_Active_Avg'] = avg_pivot[prev_m]
+            comp_df['Latest_Active_Avg'] = avg_pivot[latest_m]
+            comp_df['Prev_Units'] = units_pivot[prev_m]
+            comp_df['Latest_Units'] = units_pivot[latest_m]
+            comp_df['Prev_Active_Days'] = days_pivot[prev_m]
+            comp_df['Latest_Active_Days'] = days_pivot[latest_m]
+
+            # 计算动销日均变化量与变化率
+            comp_df['Diff_Active_Avg'] = comp_df['Latest_Active_Avg'] - comp_df['Prev_Active_Avg']
+            comp_df['Growth_Active_Avg (%)'] = comp_df.apply(
+                lambda r: ((r['Latest_Active_Avg'] - r['Prev_Active_Avg']) / r['Prev_Active_Avg'] * 100) if r['Prev_Active_Avg'] > 0 else (100.0 if r['Latest_Active_Avg'] > 0 else 0), axis=1
+            )
+
+            # 分类：大幅上升、轻微上升、平稳、下滑
+            def classify_trend(r):
+                diff = r['Diff_Active_Avg']
+                if diff > 0.5: return '🚀 动销日均大幅上升'
+                elif diff > 0: return '📈 动销日均微升'
+                elif diff == 0: return '➖ 日均持平'
+                elif diff >= -0.5: return '⚠️ 动销日均微降'
+                else: return '📉 动销日均大幅下滑'
+
+            comp_df['Trend_Status'] = comp_df.apply(classify_trend, axis=1)
+            comp_df = comp_df.reset_index()
+
+            # 筛选上升榜与下降榜
+            up_skus = comp_df[comp_df['Diff_Active_Avg'] > 0].sort_values(by='Diff_Active_Avg', ascending=False)
+            down_skus = comp_df[comp_df['Diff_Active_Avg'] < 0].sort_values(by='Diff_Active_Avg', ascending=True)
+
+            # -------------------------------------------------------------
+            # 2. KPI 概览与看板
+            # -------------------------------------------------------------
+            st.subheader(f"⚡ 1. 动销日均效率变化总览 (`{prev_m}` ➡️ `{latest_m}`)")
+
+            col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+            col_kpi1.success(f"🚀 **动销日均上升 SKU 数**: **{len(up_skus)}** 款\n\n日均出货效率有所提升，爆款动销提速")
+            col_kpi2.error(f"📉 **动销日均下滑 SKU 数**: **{len(down_skus)}** 款\n\n日均出货效率走低，需排查流量与库存")
+            col_kpi3.info(f"➖ **日均持平/无出单 SKU 数**: **{len(comp_df) - len(up_skus) - len(down_skus)}** 款")
+
+            st.markdown("---")
+
+            # -------------------------------------------------------------
+            # 3. Top 10 动销日均上升/下降对比图
+            # -------------------------------------------------------------
+            st.subheader("📊 2. 动销日均变化 Top 10 榜单可视化")
+            g1, g2 = st.columns(2)
+
+            with g1:
+                st.markdown("##### 🚀 动销日均销量『上升幅度最大 Top 10』 (件/天)")
+                top_up = up_skus.head(10)
+                if not top_up.empty:
+                    fig_up = px.bar(top_up, x=primary_sku_col, y='Diff_Active_Avg', text='Diff_Active_Avg', color_discrete_sequence=['#10B981'], labels={primary_sku_col: '产品 SKU', 'Diff_Active_Avg': '日均提升量 (件/天)'})
+                    fig_up.update_traces(texttemplate='+%{text:.1f} 件/天', textposition='outside')
+                    st.plotly_chart(fig_up, use_container_width=True)
+                else:
+                    st.info("暂无上升 SKU")
+
+            with g2:
+                st.markdown("##### 📉 动销日均销量『下滑幅度最大 Top 10』 (件/天)")
+                top_down = down_skus.head(10)
+                if not top_down.empty:
+                    fig_down = px.bar(top_down, x=primary_sku_col, y='Diff_Active_Avg', text='Diff_Active_Avg', color_discrete_sequence=['#EF4444'], labels={primary_sku_col: '产品 SKU', 'Diff_Active_Avg': '日均下滑量 (件/天)'})
+                    fig_down.update_traces(texttemplate='%{text:.1f} 件/天', textposition='outside')
+                    st.plotly_chart(fig_down, use_container_width=True)
+                else:
+                    st.info("暂无下滑 SKU")
+
+            st.markdown("---")
+
+            # -------------------------------------------------------------
+            # 4. 列表详情 (分 Tab 呈现上升/下降/全量)
+            # -------------------------------------------------------------
+            st.subheader("📋 3. 动销日均升降幅 SKU 详细诊断清单")
+            tab_up, tab_down, tab_pivot, tab_all = st.tabs([
+                f"🚀 动销日均上升榜 ({len(up_skus)} 款)", 
+                f"📉 动销日均下滑榜 ({len(down_skus)} 款)", 
+                "📊 全月份动销日均透视矩阵",
+                "📋 完整升降数据清单"
+            ])
+
+            def render_avg_table(df_subset):
+                disp = df_subset.rename(columns={
+                    primary_sku_col: '产品 SKU',
+                    'Trend_Status': '趋势状态',
+                    'Prev_Active_Avg': f'{prev_m} 动销日均 (件/天)',
+                    'Latest_Active_Avg': f'{latest_m} 动销日均 (件/天)',
+                    'Diff_Active_Avg': '日均变动量 (件/天)',
+                    'Growth_Active_Avg (%)': '动销日均变化率 (%)',
+                    'Prev_Units': f'{prev_m} 总销量 (件)',
+                    'Latest_Units': f'{latest_m} 总销量 (件)',
+                    'Prev_Active_Days': f'{prev_m} 动销天数',
+                    'Latest_Active_Days': f'{latest_m} 动销天数'
+                })
+                st.dataframe(
+                    disp[[
+                        '产品 SKU', '趋势状态', f'{latest_m} 动销日均 (件/天)', f'{prev_m} 动销日均 (件/天)',
+                        '日均变动量 (件/天)', '动销日均变化率 (%)', f'{latest_m} 总销量 (件)', f'{prev_m} 总销量 (件)'
+                    ]].style.format({
+                        f'{latest_m} 动销日均 (件/天)': '{:.1f}',
+                        f'{prev_m} 动销日均 (件/天)': '{:.1f}',
+                        '日均变动量 (件/天)': '{:+.1f}',
+                        '动销日均变化率 (%)': '{:+.1f}%',
+                        f'{latest_m} 总销量 (件)': '{:,.0f}',
+                        f'{prev_m} 总销量 (件)': '{:,.0f}'
+                    }), use_container_width=True
+                )
+
+            with tab_up:
+                if not up_skus.empty: render_avg_table(up_skus)
+                else: st.info("没有发现动销日均上升的 SKU。")
+
+            with tab_down:
+                if not down_skus.empty: render_avg_table(down_skus)
+                else: st.info("没有发现动销日均下滑的 SKU。")
+
+            with tab_pivot:
+                p_avg = sku_monthly_df.pivot(index=primary_sku_col, columns='YearMonth', values='Active_Daily_Avg').fillna(0)
+                p_avg['平均动销日均'] = p_avg.mean(axis=1)
+                p_avg = p_avg.sort_values(by='平均动销日均', ascending=False)
+                st.dataframe(p_avg.style.format("{:.1f} 件/天"), use_container_width=True)
+
+            with tab_all:
+                render_avg_table(comp_df.sort_values(by='Diff_Active_Avg', ascending=False))
+
+        else:
+            st.info("💡 请在侧边栏至少勾选 2 个月份，系统将自动对这 2 个月份的『动销日均销量』进行对比和分析！")
+
+# =========================================================================
+# 模块三：广告绩效诊断与运营看板 (SPA Ad Operations Dashboard)
+# =========================================================================
 elif module == "📢 SPA 广告绩效诊断与运营看板":
-
-    st.title(
-        "📢 SPA 广告绩效诊断与运营看板"
-    )
-
-    st.caption(
-        "支持分析广告 Spend、Sales、ROAS、Clicks、Impressions 等指标。"
-    )
-
-    uploaded_ad_file = st.sidebar.file_uploader(
-        "上传 SPA 广告数据",
-        type=[
-            "csv",
-            "xlsx",
-            "xls"
-        ],
-        key="ad_module_4",
-    )
-
-    if uploaded_ad_file is None:
-
-        st.info(
-            "请先在左侧上传 SPA 广告数据。"
-        )
-
-        st.stop()
-
-    raw_ad = read_uploaded_file(
-        uploaded_ad_file
-    )
-
-    if raw_ad is None or raw_ad.empty:
-
-        st.warning(
-            "广告文件没有有效数据。"
-        )
-
-        st.stop()
-
-    raw_ad.columns = [
-        str(c).strip()
-        for c in raw_ad.columns
-    ]
-
-    date_col = find_column(
-        raw_ad,
-        [
-            "Date",
-            "Report Date",
-            "Day",
-            "日期",
-        ],
-    )
-
-    spend_col = find_column(
-        raw_ad,
-        [
-            "Spend",
-            "Ad Spend",
-            "Media Spend",
-            "花费",
-            "广告花费",
-        ],
-    )
-
-    sales_col = find_column(
-        raw_ad,
-        [
-            "Sales",
-            "Attributed Sales",
-            "Ad Sales",
-            "销售额",
-        ],
-    )
-
-    roas_col = find_column(
-        raw_ad,
-        [
-            "ROAS",
-            "Return on Ad Spend",
-        ],
-    )
-
-    clicks_col = find_column(
-        raw_ad,
-        [
-            "Clicks",
-            "Click",
-            "点击",
-        ],
-    )
-
-    impressions_col = find_column(
-        raw_ad,
-        [
-            "Impressions",
-            "Impression",
-            "展示",
-            "曝光",
-        ],
-    )
-
-    campaign_col = find_column(
-        raw_ad,
-        [
-            "Campaign",
-            "Campaign Name",
-            "Campaign ID",
-            "广告活动",
-        ],
-    )
-
-    omsid_col = find_column(
-        raw_ad,
-        [
-            "OMSID",
-            "Promoted OMSID",
-            "Promoted OMSID Number",
-            "OMS ID",
-        ],
-    )
-
-    if spend_col is None or sales_col is None:
-
-        st.error(
-            "广告数据至少需要 Spend 和 Sales 两列。"
-        )
-
-        st.stop()
-
-    ad = pd.DataFrame()
-
-    if date_col:
-
-        ad["Date"] = pd.to_datetime(
-            raw_ad[date_col],
-            errors="coerce"
-        )
-
-    else:
-
-        ad["Date"] = pd.NaT
-
-    ad["Spend"] = clean_numeric(
-        raw_ad[spend_col]
-    )
-
-    ad["Sales"] = clean_numeric(
-        raw_ad[sales_col]
-    )
-
-    if roas_col:
-
-        ad["ROAS"] = clean_numeric(
-            raw_ad[roas_col]
-        )
-
-    else:
-
-        ad["ROAS"] = np.where(
-            ad["Spend"] > 0,
-            ad["Sales"]
-            / ad["Spend"],
-            0
-        )
-
-    if clicks_col:
-
-        ad["Clicks"] = clean_numeric(
-            raw_ad[clicks_col]
-        )
-
-    else:
-
-        ad["Clicks"] = 0
-
-    if impressions_col:
-
-        ad["Impressions"] = clean_numeric(
-            raw_ad[impressions_col]
-        )
-
-    else:
-
-        ad["Impressions"] = 0
-
-    if campaign_col:
-
-        ad["Campaign"] = (
-            raw_ad[campaign_col]
-            .fillna("Unknown")
-            .astype(str)
-        )
-
-    else:
-
-        ad["Campaign"] = "Unknown"
-
-    if omsid_col:
-
-        ad["OMSID"] = (
-            raw_ad[omsid_col]
-            .fillna("Unknown")
-            .astype(str)
-        )
-
-    else:
-
-        ad["OMSID"] = "Unknown"
-
-    ad["CTR (%)"] = np.where(
-        ad["Impressions"] > 0,
-        ad["Clicks"]
-        / ad["Impressions"]
-        * 100,
-        0
-    )
-
-    ad["CPC"] = np.where(
-        ad["Clicks"] > 0,
-        ad["Spend"]
-        / ad["Clicks"],
-        0
-    )
-
-    total_spend = (
-        ad["Spend"].sum()
-    )
-
-    total_sales_ad = (
-        ad["Sales"].sum()
-    )
-
-    overall_roas = (
-        total_sales_ad
-        / total_spend
-        if total_spend
-        else 0
-    )
-
-    total_clicks = (
-        ad["Clicks"].sum()
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Ad Spend",
-        money(total_spend)
-    )
-
-    c2.metric(
-        "Attributed Sales",
-        money(total_sales_ad)
-    )
-
-    c3.metric(
-        "ROAS",
-        f"{overall_roas:.2f}"
-    )
-
-    c4.metric(
-        "Clicks",
-        f"{total_clicks:,.0f}"
-    )
-
-    st.markdown("---")
-
-    campaign_summary = (
-        ad
-        .groupby(
-            "Campaign",
-            as_index=False
-        )
-        .agg(
-            Spend=(
-                "Spend",
-                "sum"
-            ),
-            Sales=(
-                "Sales",
-                "sum"
-            ),
-            Clicks=(
-                "Clicks",
-                "sum"
-            ),
-            Impressions=(
-                "Impressions",
-                "sum"
-            ),
-        )
-    )
-
-    campaign_summary["ROAS"] = np.where(
-        campaign_summary["Spend"] > 0,
-        campaign_summary["Sales"]
-        / campaign_summary["Spend"],
-        0
-    )
-
-    campaign_summary = (
-        campaign_summary
-        .sort_values(
-            "Sales",
-            ascending=False
-        )
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.subheader(
-            "Campaign Performance"
-        )
-
-        st.dataframe(
-            campaign_summary.style.format(
-                {
-                    "Spend": "${:,.0f}",
-                    "Sales": "${:,.0f}",
-                    "Clicks": "{:,.0f}",
-                    "Impressions": "{:,.0f}",
-                    "ROAS": "{:.2f}",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with col2:
-
-        top_campaign = (
-            campaign_summary
-            .head(15)
-            .sort_values("ROAS")
-        )
-
-        fig = px.bar(
-            top_campaign,
-            x="ROAS",
-            y="Campaign",
-            orientation="h",
-            text_auto=".2f",
-        )
-
-        fig.update_layout(
-            height=500
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    if ad["Date"].notna().any():
-
-        st.subheader(
-            "Daily Advertising Trend"
-        )
-
-        daily_ad = (
-            ad
-            .dropna(
-                subset=["Date"]
-            )
-            .groupby(
-                "Date",
-                as_index=False
-            )
-            .agg(
-                Spend=(
-                    "Spend",
-                    "sum"
-                ),
-                Sales=(
-                    "Sales",
-                    "sum"
-                ),
-                Clicks=(
-                    "Clicks",
-                    "sum"
-                ),
-                Impressions=(
-                    "Impressions",
-                    "sum"
-                ),
-            )
-        )
-
-        daily_ad["ROAS"] = np.where(
-            daily_ad["Spend"] > 0,
-            daily_ad["Sales"]
-            / daily_ad["Spend"],
-            0
-        )
-
-        fig = px.line(
-            daily_ad,
-            x="Date",
-            y="ROAS",
-            markers=True,
-        )
-
-        fig.update_layout(
-            height=450,
-            yaxis_title="ROAS"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    st.subheader(
-        "OMSID Performance"
-    )
-
-    omsid_summary = (
-        ad
-        .groupby(
-            "OMSID",
-            as_index=False
-        )
-        .agg(
-            Spend=(
-                "Spend",
-                "sum"
-            ),
-            Sales=(
-                "Sales",
-                "sum"
-            ),
-            Clicks=(
-                "Clicks",
-                "sum"
-            ),
-            Impressions=(
-                "Impressions",
-                "sum"
-            ),
-        )
-    )
-
-    omsid_summary["ROAS"] = np.where(
-        omsid_summary["Spend"] > 0,
-        omsid_summary["Sales"]
-        / omsid_summary["Spend"],
-        0
-    )
-
-    omsid_summary["CTR (%)"] = np.where(
-        omsid_summary["Impressions"] > 0,
-        omsid_summary["Clicks"]
-        / omsid_summary["Impressions"]
-        * 100,
-        0
-    )
-
-    omsid_summary = (
-        omsid_summary
-        .sort_values(
-            "Sales",
-            ascending=False
-        )
-    )
-
-    st.dataframe(
-        omsid_summary.style.format(
-            {
-                "Spend": "${:,.0f}",
-                "Sales": "${:,.0f}",
-                "Clicks": "{:,.0f}",
-                "Impressions": "{:,.0f}",
-                "ROAS": "{:.2f}",
-                "CTR (%)": "{:.2f}%",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# =========================================================
-# MODULE 5
-# 下月销售目标与 SKU 销量拆解看板
-# =========================================================
-
-elif module == "🎯 下月销售目标与 SKU 销量拆解看板":
-
-    st.title(
-        "🎯 下月销售目标与 SKU 销量拆解看板"
-    )
-
-    st.caption(
-        "根据最近一段时间 SKU 销售结构，将下月目标拆解到 SKU。"
-    )
-
-    uploaded_sales_file = upload_sales_sidebar(
-        "sales_module_5"
-    )
-
-    if uploaded_sales_file is None:
-
-        st.info(
-            "请先在左侧上传销售数据。"
-        )
-
-        st.stop()
-
-    raw_sales = read_uploaded_file(
-        uploaded_sales_file
-    )
-
-    df_sales, error = process_sales_data(
-        raw_sales
-    )
-
-    if error:
-
-        st.error(error)
-
-        st.stop()
-
-    min_date = (
-        df_sales["Clean_Date"]
-        .min()
-        .date()
-    )
-
-    max_date = (
-        df_sales["Clean_Date"]
-        .max()
-        .date()
-    )
-
-    st.sidebar.markdown("---")
-
-    lookback_days = st.sidebar.number_input(
-        "参考历史天数",
-        min_value=7,
-        max_value=180,
-        value=30,
-        step=1,
-        key="m5_lookback",
-    )
-
-    growth_rate = st.sidebar.number_input(
-        "下月目标增长率 (%)",
-        min_value=-100.0,
-        max_value=500.0,
-        value=20.0,
-        step=5.0,
-        key="m5_growth",
-    )
-
-    target_sales = st.sidebar.number_input(
-        "下月销售目标 ($)",
-        min_value=0.0,
-        value=100000.0,
-        step=5000.0,
-        key="m5_target",
-    )
-
-    anchor_date = st.sidebar.date_input(
-        "目标基准日",
-        value=max_date,
-        min_value=min_date,
-        max_value=max_date,
-        key="m5_anchor",
-    )
-
-    anchor = pd.Timestamp(
-        anchor_date
-    )
-
-    lookback_start = (
-        anchor
-        - pd.Timedelta(
-            days=lookback_days - 1
-        )
-    )
-
-    ref_df = df_sales[
-        (
-            df_sales["Clean_Date"]
-            >= lookback_start
-        )
-        &
-        (
-            df_sales["Clean_Date"]
-            <= anchor
-        )
-    ].copy()
-
-    if ref_df.empty:
-
-        st.warning(
-            "参考日期范围没有数据。"
-        )
-
-        st.stop()
-
-    sku_ref = (
-        ref_df
-        .groupby(
-            "Clean_SKU",
-            as_index=False
-        )
-        .agg(
-            Sales=(
-                "Clean_Sales",
-                "sum"
-            ),
-            Units=(
-                "Clean_Units",
-                "sum"
-            ),
-        )
-    )
-
-    sku_ref["Avg Price"] = np.where(
-        sku_ref["Units"] > 0,
-        sku_ref["Sales"]
-        / sku_ref["Units"],
-        0
-    )
-
-    sku_ref = sku_ref[
-        sku_ref["Units"] > 0
-    ].copy()
-
-    if sku_ref.empty:
-
-        st.warning(
-            "参考期间没有销量。"
-        )
-
-        st.stop()
-
-    base_sales = (
-        sku_ref["Sales"].sum()
-    )
-
-    base_units = (
-        sku_ref["Units"].sum()
-    )
-
-    # If target is 0, calculate it automatically
-    if target_sales <= 0:
-
-        target_sales = (
-            base_sales
-            * (
-                1
-                + growth_rate
-                / 100
-            )
-        )
-
-    sku_ref["Sales Share (%)"] = np.where(
-        base_sales > 0,
-        sku_ref["Sales"]
-        / base_sales
-        * 100,
-        0
-    )
-
-    sku_ref["Target Sales"] = np.where(
-        base_sales > 0,
-        target_sales
-        * sku_ref["Sales"]
-        / base_sales,
-        0
-    )
-
-    sku_ref["Target Units"] = np.where(
-        sku_ref["Avg Price"] > 0,
-        sku_ref["Target Sales"]
-        / sku_ref["Avg Price"],
-        0
-    )
-
-    # Next month days
-    if anchor.month == 12:
-
-        next_year = anchor.year + 1
-        next_month = 1
-
-    else:
-
-        next_year = anchor.year
-        next_month = anchor.month + 1
-
-    days_next_month = calendar.monthrange(
-        next_year,
-        next_month
-    )[1]
-
-    sku_ref["Target Daily Units"] = (
-        sku_ref["Target Units"]
-        / days_next_month
-    )
-
-    sku_ref[
-        "Target Sales Growth (%)"
-    ] = growth_rate
-
-    sku_ref = sku_ref.sort_values(
-        "Target Sales",
-        ascending=False
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "参考期 Sales",
-        money(base_sales)
-    )
-
-    c2.metric(
-        "参考期 Units",
-        number(base_units)
-    )
-
-    c3.metric(
-        "下月 Sales Target",
-        money(target_sales)
-    )
-
-    c4.metric(
-        "目标增长率",
-        f"{growth_rate:+.1f}%"
-    )
-
-    st.markdown("---")
-
-    st.subheader(
-        "SKU 目标拆解"
-    )
-
-    display_target = sku_ref.copy()
-
-    for col in [
-        "Sales",
-        "Avg Price",
-        "Target Sales"
-    ]:
-
-        display_target[col] = (
-            display_target[col]
-            .map(
-                lambda x:
-                f"${x:,.0f}"
-            )
-        )
-
-    for col in [
-        "Units",
-        "Target Units"
-    ]:
-
-        display_target[col] = (
-            display_target[col]
-            .map(
-                lambda x:
-                f"{x:,.0f}"
-            )
-        )
-
-    display_target[
-        "Target Daily Units"
-    ] = (
-        display_target[
-            "Target Daily Units"
-        ]
-        .map(
-            lambda x:
-            f"{x:,.1f}"
-        )
-    )
-
-    display_target[
-        "Sales Share (%)"
-    ] = (
-        display_target[
-            "Sales Share (%)"
-        ]
-        .map(
-            lambda x:
-            f"{x:.1f}%"
-        )
-    )
-
-    display_target[
-        "Target Sales Growth (%)"
-    ] = (
-        display_target[
-            "Target Sales Growth (%)"
-        ]
-        .map(
-            lambda x:
-            f"{x:+.1f}%"
-        )
-    )
-
-    st.dataframe(
-        display_target[
-            [
-                "Clean_SKU",
-                "Sales",
-                "Units",
-                "Avg Price",
-                "Sales Share (%)",
-                "Target Sales",
-                "Target Units",
-                "Target Daily Units",
-                "Target Sales Growth (%)",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-        height=600,
-    )
-
-    left, right = st.columns(2)
-
-    with left:
-
-        chart_df = (
-            sku_ref
-            .head(15)
-            .sort_values(
-                "Target Sales"
-            )
-        )
-
-        fig = px.bar(
-            chart_df,
-            x="Target Sales",
-            y="Clean_SKU",
-            orientation="h",
-            text_auto=".2s",
-        )
-
-        fig.update_layout(
-            height=550,
-            xaxis_title="Target Sales"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with right:
-
-        chart_df = (
-            sku_ref
-            .head(15)
-            .sort_values(
-                "Target Units"
-            )
-        )
-
-        fig = px.bar(
-            chart_df,
-            x="Target Units",
-            y="Clean_SKU",
-            orientation="h",
-            text_auto=".0f",
-        )
-
-        fig.update_layout(
-            height=550,
-            xaxis_title="Target Units"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    csv_target = (
-        sku_ref
-        .to_csv(index=False)
-        .encode("utf-8-sig")
-    )
-
-    st.download_button(
-        "下载 SKU 目标拆解 CSV",
-        data=csv_target,
-        file_name=(
-            "SKU_Target_Breakdown_"
-            f"{anchor.strftime('%Y%m%d')}.csv"
-        ),
-        mime="text/csv",
-    )
+    st.title("📢 Home Depot SPA 广告绩效诊断与运营决策看板")
+    st.caption("聚焦运营动作：止损排查、高 ROAS 扩量、转化率诊断与预算分配")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 广告数据上传")
+    uploaded_ad_file = st.sidebar.file_uploader("上传 Home Depot 广告报表 (CSV/Excel)", type=["csv", "xlsx"], key="ad_uploader")
+
+    if not uploaded_ad_file:
+        st.info("👋 请在侧边栏上传您的 Home Depot SPA 广告报表。")
+    else:
+        try:
+            if uploaded_ad_file.name.endswith('.csv'): df_ad = pd.read_csv(uploaded_ad_file)
+            else: df_ad = pd.read_excel(uploaded_ad_file)
+        except Exception as e:
+            st.error(f"读取广告文件失败: {e}"); st.stop()
+
+        df_ad.columns = df_ad.columns.str.strip()
+        campaign_col = next((c for c in df_ad.columns if c in ['Campaign Name', 'Campaign']), None)
+        spend_col = next((c for c in df_ad.columns if c in ['Spend', 'Cost', 'Ad Spend']), None)
+        sales_col = next((c for c in df_ad.columns if c in ['SPA Sales', 'Sales', 'Ad Sales']), None)
+        clicks_col = next((c for c in df_ad.columns if c in ['Clicks', 'Click']), None)
+        impressions_col = next((c for c in df_ad.columns if c in ['Impressions', 'Impression']), None)
+        roas_col = next((c for c in df_ad.columns if c in ['SPA ROAS', 'ROAS']), None)
+        omsid_col = next((c for c in df_ad.columns if c in ['Promoted OMSID Number', 'OMSID', 'Promoted OMS ID']), None)
+
+        if not campaign_col or not spend_col or not sales_col:
+            st.error(f"解析失败！请确保包含 Campaign Name, Spend, SPA Sales 列。")
+            st.stop()
+
+        for col in [spend_col, sales_col, clicks_col, impressions_col, roas_col]:
+            if col and col in df_ad.columns:
+                df_ad[col] = pd.to_numeric(df_ad[col].astype(str).str.replace('$', '').str.replace(',', '').str.replace('%', ''), errors='coerce').fillna(0)
+
+        st.sidebar.markdown("---")
+        st.sidebar.header("🎯 2. 运营优化阈值设置")
+        target_roas = st.sidebar.number_input("目标 ROAS", min_value=0.1, value=2.5, step=0.5)
+        waste_spend_threshold = st.sidebar.number_input("零转化报警 Spend 阈值 ($)", min_value=1.0, value=30.0, step=10.0)
+
+        total_spend = df_ad[spend_col].sum() if spend_col else 0
+        total_sales = df_ad[sales_col].sum() if sales_col else 0
+        total_clicks = df_ad[clicks_col].sum() if clicks_col else 0
+        total_impressions = df_ad[impressions_col].sum() if impressions_col else 0
+
+        overall_roas = total_sales / total_spend if total_spend > 0 else 0
+        overall_ctr = (total_clicks / total_impressions) * 100 if total_impressions > 0 else 0
+        overall_cpc = total_spend / total_clicks if total_clicks > 0 else 0
+
+        st.subheader("📌 1. 广告大盘核心指标 (Macro Overview)")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("总广告花费 (Spend)", f"${total_spend:,.2f}")
+        c2.metric("广告销售额 (SPA Sales)", f"${total_sales:,.2f}")
+        roas_delta = overall_roas - target_roas
+        c3.metric("整体 ROAS", f"{overall_roas:.2f}", delta=f"{roas_delta:+.2f} vs 目标", delta_color="normal" if roas_delta >= 0 else "inverse")
+        c4.metric("总点击 / 平均 CPC", f"{int(total_clicks):,} 次", delta=f"${overall_cpc:.2f}/点击", delta_color="off")
+        c5.metric("总曝光 / CTR", f"{int(total_impressions):,} 次", delta=f"{overall_ctr:.2f}% CTR", delta_color="off")
+
+        st.markdown("---")
+        st.subheader("🚨 2. 运营调优诊断中心 (Actionable Insights)")
+        wasted_df = df_ad[(df_ad[spend_col] >= waste_spend_threshold) & (df_ad[sales_col] == 0)]
+        total_wasted_spend = wasted_df[spend_col].sum()
+        bleed_df = df_ad[(df_ad[spend_col] >= waste_spend_threshold) & (df_ad[sales_col] > 0) & (df_ad[roas_col] < (target_roas * 0.6))]
+        potential_df = df_ad[(df_ad[roas_col] >= target_roas) & (df_ad[spend_col] < (total_spend / max(len(df_ad), 1)))]
+
+        d1, d2, d3 = st.columns(3)
+        d1.error(f"🔻 **无效花费资金浪费**: `${total_wasted_spend:,.2f}`\n\n**{len(wasted_df)}** 项 Spend ≥ ${waste_spend_threshold} 且出单为 0。")
+        d2.warning(f"⚠️ **低效出血点广告**: **{len(bleed_df)}** 项\n\nSpend ≥ ${waste_spend_threshold} 且 ROAS 远低于目标。")
+        d3.success(f"🚀 **高 ROAS 扩量机会**: **{len(potential_df)}** 项\n\nROAS 达标（≥ {target_roas}），建议增加每日预算！")
+
+        tab1, tab2, tab3 = st.tabs(["🔥 重点排查：无转化浪费项", "⚠️ 低效出血点列表", "🚀 扩量提额潜力项"])
+        with tab1:
+            if not wasted_df.empty: st.dataframe(wasted_df[[campaign_col, omsid_col, spend_col, clicks_col, impressions_col]].sort_values(by=spend_col, ascending=False), use_container_width=True)
+            else: st.info("🎉 暂未发现无转化浪费项。")
+        with tab2:
+            if not bleed_df.empty: st.dataframe(bleed_df[[campaign_col, omsid_col, spend_col, sales_col, roas_col, clicks_col]].sort_values(by=spend_col, ascending=False), use_container_width=True)
+            else: st.info("暂未发现出血点广告。")
+        with tab3:
+            if not potential_df.empty: st.dataframe(potential_df[[campaign_col, omsid_col, spend_col, sales_col, roas_col]].sort_values(by=roas_col, ascending=False), use_container_width=True)
+            else: st.info("暂未识别到潜力广告。")
+
+# =========================================================================
+# 模块四：下月销售目标与 SKU 销量拆解看板 (Target Setting & SKU Forecasting)
+# =========================================================================
+else:
+    st.title("🎯 下月销售目标制定与 SKU 销量预测拆解看板")
+    st.caption("基于历史动销速率与目标增长率，科学预测下月销售目标并层层拆解至各 SKU")
+    st.markdown("---")
+
+    st.sidebar.header("⚙️ 1. 历史销售数据上传")
+    uploaded_sales_file = st.sidebar.file_uploader("上传历史销售报表 (CSV/Excel)", type=["csv", "xlsx"], key="target_uploader")
+
+    if not uploaded_sales_file:
+        st.info("👋 请先在侧边栏上传历史销售报表。系统将自动抓取近 30 天的动销数据进行下月目标推演。")
+    else:
+        try:
+            df_raw = pd.read_csv(uploaded_sales_file) if uploaded_sales_file.name.endswith('.csv') else pd.read_excel(uploaded_sales_file)
+        except Exception as e:
+            st.error(f"读取文件失败: {e}"); st.stop()
+
+        res, err = process_sales_data(df_raw)
+        if err: st.error(err); st.stop()
+        df_sales, sku_col = res
+
+        # 取最近 30 天数据作为计算权重的基准期
+        max_date = df_sales['Clean_Date'].max()
+        last_30_days_start = max_date - pd.Timedelta(days=30)
+        recent_sales = df_sales[df_sales['Clean_Date'] >= last_30_days_start]
+
+        # 计算各 SKU 历史基准表现
+        sku_recent = recent_sales.groupby(sku_col).agg(
+            Recent_Units=('Clean_Units', 'sum'),
+            Recent_Cost=('Clean_Cost', 'sum'),
+            Active_Days=('Clean_Date', lambda x: x[df_sales.loc[x.index, 'Clean_Units'] > 0].nunique()),
+            Avg_Price=('Clean_Cost', lambda x: x.sum() / df_sales.loc[x.index, 'Clean_Units'].sum() if df_sales.loc[x.index, 'Clean_Units'].sum() > 0 else 0)
+        ).reset_index()
+
+        sku_recent['Active_Daily_Avg'] = sku_recent.apply(
+            lambda r: r['Recent_Units'] / r['Active_Days'] if r['Active_Days'] > 0 else 0, axis=1
+        )
+
+        last_month_cost = sku_recent['Recent_Cost'].sum()
+
+        # -----------------------------------------------------------------
+        # 目标参数设定区
+        # -----------------------------------------------------------------
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### ⚙️ 2. 下月目标设定参数")
+
+        target_mode = st.sidebar.radio("目标制定方式", ["按销售额增长率 (%)", "按自定义总销售额 ($)"])
+
+        if target_mode == "按销售额增长率 (%)":
+            growth_rate = st.sidebar.number_input("下月目标增长率 (%)", value=10.0, step=1.0)
+            target_total_cost = last_month_cost * (1 + growth_rate / 100)
+        else:
+            target_total_cost = st.sidebar.number_input("下月目标总金额 ($)", value=float(round(last_month_cost * 1.1, 2)))
+            growth_rate = ((target_total_cost - last_month_cost) / last_month_cost * 100) if last_month_cost > 0 else 0
+
+        # -----------------------------------------------------------------
+        # 1. 下月目标概览 KPI
+        # -----------------------------------------------------------------
+        st.subheader("📌 1. 下月全盘经营目标")
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("近 30 天实际完成额", f"${last_month_cost:,.2f}")
+        t2.metric("下月目标销售额", f"${target_total_cost:,.2f}", delta=f"{growth_rate:+.1f}% 增长")
+
+        avg_price_all = sku_recent['Recent_Cost'].sum() / sku_recent['Recent_Units'].sum() if sku_recent['Recent_Units'].sum() > 0 else 0
+        target_total_units = target_total_cost / avg_price_all if avg_price_all > 0 else 0
+
+        t3.metric("预估需出货总件数", f"{int(target_total_units):,} 件")
+        t4.metric("下月日均目标营收", f"${target_total_cost / 30:,.2f} /天")
+
+        st.markdown("---")
+
+        # -----------------------------------------------------------------
+        # 2. 算法自动拆解至 SKU
+        # -----------------------------------------------------------------
+        st.subheader("📦 2. 各 SKU 下
