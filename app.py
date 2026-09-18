@@ -77,7 +77,7 @@ def render_rtv_dashboard(rtv_file):
         rtv_sku = rtv_df.groupby('产品SKU').agg(
             产品名称=('产品名称', 'first') if '产品名称' in rtv_df.columns else ('产品SKU', 'first'),
             退货件数=('QTY', 'sum'),
-            10百分之运费=('10%运费', 'sum'),
+            运费扣款10=('10%运费', 'sum'),
             总扣款=('总扣款', 'sum'),
             退货次数=('RTV Number', 'nunique') if 'RTV Number' in rtv_df.columns else ('产品SKU', 'count')
         ).reset_index().sort_values(by='总扣款', ascending=False)
@@ -95,7 +95,7 @@ def render_rtv_dashboard(rtv_file):
         st.dataframe(
             rtv_sku,
             column_config={
-                "10百分之运费": st.column_config.NumberColumn("10%运费扣款", format="$%.2f"),
+                "运费扣款10": st.column_config.NumberColumn("10%运费扣款", format="$%.2f"),
                 "总扣款": st.column_config.NumberColumn("总扣款金额", format="$%.2f"),
             },
             use_container_width=True, 
@@ -111,7 +111,7 @@ rtv_file = st.sidebar.file_uploader("2️⃣ 上传退货数据表 (CSV/XLSX)", 
 
 # 4. 智能路由渲染
 if sales_file is None and rtv_file is not None:
-    # 情况 1：只上传了退货表，直接全屏展示退货看板
+    # 情况 1：只上传了退货表，直接展示退货看板
     st.subheader("🔄 RTV 退货分析看板")
     render_rtv_dashboard(rtv_file)
 
