@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📊 电商全景综合销售数据分析看板")
-st.caption("集成动销分析（日均销量/动销天数）、运营绩效、SKU 帕累托等级划分、渠道地址分析及 SKU 维度退货扣款分析")
+st.caption("集成动销分析（日均销量/动销天数）、运营绩效、SKU 帕累托等级划分、渠道地址分析及多维度 SKU 退货率分析")
 
 # =========================================================================
 # 2. 数据加载与清洗函数
@@ -29,6 +29,8 @@ def load_sales_data(uploaded_file):
 
     if 'Order Date' in df.columns:
         df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
+        df['YearMonth'] = df['Order Date'].dt.to_period('M').astype(str)
+        df['YearQuarter'] = df['Order Date'].dt.to_period('Q').astype(str)
     
     numeric_cols = ['Unit Cost', 'Quantity', 'Total Cost']
     for col in numeric_cols:
@@ -51,13 +53,17 @@ def load_return_data(uploaded_file):
     
     df.columns = df.columns.astype(str).str.strip()
 
+    # 日期字段统一解析与周期维度计算
     date_cols = ['RTV Date', 'Order Date']
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    if 'RTV Date' in df.columns:
-        df['RTV Month'] = df['RTV Date'].dt.to_period('M').astype(str)
+    # 优先基于 RTV Date 计算，若无则基于 Order Date
+    target_date_col = 'RTV Date' if 'RTV Date' in df.columns else ('Order Date' if 'Order Date' in df.columns else None)
+    if target_date_col:
+        df['YearMonth'] = df[target_date_col].dt.to_period('M').astype(str)
+        df['YearQuarter'] = df[target_date_col].dt.to_period('Q').astype(str)
 
     numeric_cols = ['QTY', 'UNIT COST', 'Total Cost', '10%运费', '总扣款']
     for col in numeric_cols:
@@ -94,21 +100,25 @@ def calc_kpis(data_df, period_days=None):
     
     return sales, qty, orders, aov, days, daily_sales, daily_qty
 
+# 识别 SKU 列工具函数
+def get_sku_col(df_columns):
+    for col in ['产品SKU', 'Merchant SKU', 'Vendor SKU', 'PART#', 'SKU']:
+        if col in df_columns:
+            return col
+    return None
+
 # =========================================================================
 # 3. 侧边栏：文件上传与全局筛选
 # =========================================================================
 st.sidebar.header("📁 数据导入")
 uploaded_sales_file = st.sidebar.file_uploader("1. 上传销售分析数据表 (CSV/Excel)", type=["csv", "xlsx"], key="sales_uploader")
 uploaded_return_file = st.sidebar.file_uploader("2. 上传退货数据表 (CSV/Excel)", type=["csv", "xlsx"], key="return_uploader")
-# 新增：独立上传全量总出单表，用于匹配 RTV 退货率
 uploaded_total_orders_file = st.sidebar.file_uploader("3. 上传全量总出单表 (CSV/Excel) [选填，用于匹配 RTV]", type=["csv", "xlsx"], key="total_orders_uploader")
 
 if uploaded_sales_file is not None:
     raw_df = load_sales_data(uploaded_sales_file)
     df = raw_df.dropna(subset=['Order Date']).copy() if 'Order Date' in raw_df.columns else raw_df.copy()
     rtv_df = load_return_data(uploaded_return_file) if uploaded_return_file is not None else None
-    
-    # 加载全量总出单表数据
     total_orders_df = load_sales_data(uploaded_total_orders_file) if uploaded_total_orders_file is not None else None
 
     st.sidebar.subheader("🔍 全局维度筛选")
@@ -135,7 +145,7 @@ if uploaded_sales_file is not None:
         "👤 2. 分运营销售数据看板", 
         "🏆 3. 产品 SKU 排名与动销分析",
         "🏪 4. HD 门店 vs 个人地址占比",
-        "🔄 5. 退货与扣款 (SKU 维度分析)"
+        "🔄 5. 退货与扣款 (多时间维度分析)"
     ])
 
     # -------------------------------------------------------------------------
@@ -298,10 +308,10 @@ if uploaded_sales_file is not None:
     # -------------------------------------------------------------------------
     with tab_sku_rank:
         st.header("🏆 产品 SKU 综合排名与动销深度分析看板")
-        sku_col = '产品SKU' if '产品SKU' in df.columns else ('Merchant SKU' if 'Merchant SKU' in df.columns else 'Vendor SKU')
+        sku_col = get_sku_col(df.columns)
         name_col = '产品名称' if '产品名称' in df.columns else 'Description'
 
-        if sku_col in df.columns:
+        if sku_col:
             total_days_range = max((df['Order Date'].max() - df['Order Date'].min()).days + 1, 1) if 'Order Date' in df.columns else 1
 
             sku_rank_df = df.groupby(sku_col).agg(
@@ -376,90 +386,151 @@ if uploaded_sales_file is not None:
         k4.metric("个人地址销售额占比", f"{(home_sales/tot_sales_all*100):.2f}%", f"${home_sales:,.2f}")
 
     # -------------------------------------------------------------------------
-    # TAB 5: 退货与扣款 (适配上传的总出单表表头进行自动匹配)
+    # TAB 5: SKU 维度退货与扣款 (月度 / 季度 / 整体 多视角分析)
     # -------------------------------------------------------------------------
     with tab_returns:
-        st.header("🔄 退货与扣款 (产品 SKU 深度分析看板)")
-        
+        st.header("🔄 退货与扣款分析 (SKU 维度 × 时间视角)")
+
         if rtv_df is not None and not rtv_df.empty:
-            rtv_sku_col = '产品SKU' if '产品SKU' in rtv_df.columns else ('PART#' if 'PART#' in rtv_df.columns else ('SKU' if 'SKU' in rtv_df.columns else None))
+            rtv_sku_col = get_sku_col(rtv_df.columns)
             rtv_name_col = '产品名称' if '产品名称' in rtv_df.columns else rtv_sku_col
 
             if not rtv_sku_col:
                 st.error("⚠️ 未在退货表格中找到 SKU 列 (如 'PART#', 'SKU', '产品SKU')，请核对表头。")
             else:
-                total_rtv_qty = rtv_df['QTY'].sum()
-                total_rtv_cost = rtv_df['Total Cost'].sum()
-                total_shipping_fee = rtv_df['10%运费'].sum()
-                total_deduction = rtv_df['总扣款'].sum()
+                # 确定出货量匹配数据源（优先使用总出单表，无则使用销售分析表）
+                match_source_df = total_orders_df if total_orders_df is not None else df
+                source_label = "全量总出单表" if total_orders_df is not None else "销售分析表"
+                sales_sku_col = get_sku_col(match_source_df.columns)
 
-                rk1, rk2, rk3, rk4 = st.columns(4)
-                rk1.metric("📦 累计退货件数", f"{int(total_rtv_qty):,} 件")
-                rk2.metric("💵 退货货值 (Total Cost)", f"${total_rtv_cost:,.2f}")
-                rk3.metric("🚚 10% 运费扣款", f"${total_shipping_fee:,.2f}")
-                rk4.metric("💥 累计总扣款 (Total Charge)", f"${total_deduction:,.2f}")
+                # 时间维度切换卡
+                st.subheader("⚙️ 分析维度控制台")
+                c_mode, c_info = st.columns([2, 3])
+                with c_mode:
+                    time_granularity = st.radio(
+                        "请选择退货率分析的时间视角:",
+                        ["按整体 (Overall)", "按月份 (Monthly)", "按季度 (Quarterly)"],
+                        horizontal=True
+                    )
+                with c_info:
+                    st.caption(f"📌 数据源提示: 出货量当前匹配自【**{source_label}**】。选择月份/季度视角时，系统会自动将同一时间段内的退货量与出货量挂钩匹配。")
 
-                st.divider()
+                # ----------------- 数据聚合与关联逻辑 -----------------
+                # 1. 整体维度 (SKU 唯一)
+                if "按整体" in time_granularity:
+                    group_cols = [rtv_sku_col]
+                    sales_group_cols = [sales_sku_col] if sales_sku_col else []
 
-                # 判断使用“独立总出单表”还是“销售主表”
-                if total_orders_df is not None:
-                    match_source_df = total_orders_df
-                    st.success("✅ 已检测到独立的【全量总出单表】，正使用其匹配 SKU 出货总量。")
+                    sku_rtv_summary = rtv_df.groupby(group_cols).agg(
+                        产品名称=(rtv_name_col, 'first'),
+                        退货次数=('RTV Number', 'count') if 'RTV Number' in rtv_df.columns else (rtv_sku_col, 'count'),
+                        退货总件数=('QTY', 'sum'),
+                        退货货值=('Total Cost', 'sum'),
+                        运费扣款=('10%运费', 'sum'),
+                        总扣款金额=('总扣款', 'sum')
+                    ).reset_index()
+
+                    if sales_sku_col and 'Quantity' in match_source_df.columns:
+                        sales_qty_df = match_source_df.groupby(sales_group_cols)['Quantity'].sum().reset_index()
+                        sales_qty_df.columns = [rtv_sku_col, '总出货销量']
+                        sku_rtv_summary = pd.merge(sku_rtv_summary, sales_qty_df, on=rtv_sku_col, how='left')
+                    else:
+                        sku_rtv_summary['总出货销量'] = 0
+
+                # 2. 月份维度 (SKU + YearMonth)
+                elif "按月份" in time_granularity:
+                    if 'YearMonth' not in rtv_df.columns:
+                        st.error("⚠️ 退货表中缺少日期字段，无法划分月份。")
+                        st.stop()
+
+                    group_cols = [rtv_sku_col, 'YearMonth']
+                    sales_group_cols = [sales_sku_col, 'YearMonth'] if sales_sku_col and 'YearMonth' in match_source_df.columns else []
+
+                    sku_rtv_summary = rtv_df.groupby(group_cols).agg(
+                        产品名称=(rtv_name_col, 'first'),
+                        退货次数=('RTV Number', 'count') if 'RTV Number' in rtv_df.columns else (rtv_sku_col, 'count'),
+                        退货总件数=('QTY', 'sum'),
+                        退货货值=('Total Cost', 'sum'),
+                        运费扣款=('10%运费', 'sum'),
+                        总扣款金额=('总扣款', 'sum')
+                    ).reset_index()
+
+                    if sales_group_cols and 'Quantity' in match_source_df.columns:
+                        sales_qty_df = match_source_df.groupby(sales_group_cols)['Quantity'].sum().reset_index()
+                        sales_qty_df.columns = [rtv_sku_col, 'YearMonth', '总出货销量']
+                        sku_rtv_summary = pd.merge(sku_rtv_summary, sales_qty_df, on=[rtv_sku_col, 'YearMonth'], how='left')
+                    else:
+                        sku_rtv_summary['总出货销量'] = 0
+
+                # 3. 季度维度 (SKU + YearQuarter)
                 else:
-                    match_source_df = df
-                    st.info("💡 未单独上传【全量总出单表】，当前默认使用上传的【销售分析表】匹配 SKU 出货总量。")
+                    if 'YearQuarter' not in rtv_df.columns:
+                        st.error("⚠️ 退货表中缺少日期字段，无法划分季度。")
+                        st.stop()
 
-                sku_rtv_summary = rtv_df.groupby(rtv_sku_col).agg(
-                    产品名称=(rtv_name_col, 'first'),
-                    退货次数=('RTV Number', 'count') if 'RTV Number' in rtv_df.columns else (rtv_sku_col, 'count'),
-                    退货总件数=('QTY', 'sum'),
-                    退货货值=('Total Cost', 'sum'),
-                    运费扣款=('10%运费', 'sum'),
-                    总扣款金额=('总扣款', 'sum'),
-                    主要退货原因=('Reason', lambda x: x.mode()[0] if not x.empty else '未知') if 'Reason' in rtv_df.columns else (rtv_sku_col, lambda x: '未知')
-                ).reset_index()
+                    group_cols = [rtv_sku_col, 'YearQuarter']
+                    sales_group_cols = [sales_sku_col, 'YearQuarter'] if sales_sku_col and 'YearQuarter' in match_source_df.columns else []
 
-                # 根据指定的表头（产品SKU -> Merchant SKU -> Vendor SKU）识别匹配列
-                target_sales_sku_col = None
-                for col_name in ['产品SKU', 'Merchant SKU', 'Vendor SKU']:
-                    if col_name in match_source_df.columns:
-                        target_sales_sku_col = col_name
-                        break
+                    sku_rtv_summary = rtv_df.groupby(group_cols).agg(
+                        产品名称=(rtv_name_col, 'first'),
+                        退货次数=('RTV Number', 'count') if 'RTV Number' in rtv_df.columns else (rtv_sku_col, 'count'),
+                        退货总件数=('QTY', 'sum'),
+                        退货货值=('Total Cost', 'sum'),
+                        运费扣款=('10%运费', 'sum'),
+                        总扣款金额=('总扣款', 'sum')
+                    ).reset_index()
 
-                if target_sales_sku_col and 'Quantity' in match_source_df.columns:
-                    sales_qty_df = match_source_df.groupby(target_sales_sku_col)['Quantity'].sum().reset_index()
-                    sales_qty_df.columns = [rtv_sku_col, '总出货销量']
-                    
-                    # 关联计算退货率
-                    sku_rtv_summary = pd.merge(sku_rtv_summary, sales_qty_df, on=rtv_sku_col, how='left')
-                    sku_rtv_summary['总出货销量'] = sku_rtv_summary['总出货销量'].fillna(0)
-                else:
-                    sku_rtv_summary['总出货销量'] = 0
+                    if sales_group_cols and 'Quantity' in match_source_df.columns:
+                        sales_qty_df = match_source_df.groupby(sales_group_cols)['Quantity'].sum().reset_index()
+                        sales_qty_df.columns = [rtv_sku_col, 'YearQuarter', '总出货销量']
+                        sku_rtv_summary = pd.merge(sku_rtv_summary, sales_qty_df, on=[rtv_sku_col, 'YearQuarter'], how='left')
+                    else:
+                        sku_rtv_summary['总出货销量'] = 0
 
+                # 通用指标计算
+                sku_rtv_summary['总出货销量'] = sku_rtv_summary['总出货销量'].fillna(0)
                 sku_rtv_summary['退货率'] = sku_rtv_summary.apply(
                     lambda r: (r['退货总件数'] / r['总出货销量'] * 100) if r['总出货销量'] > 0 else 0, axis=1
                 )
-
                 sku_rtv_summary = sku_rtv_summary.sort_values('总扣款金额', ascending=False)
 
-                st.subheader("🏷️ 全量 SKU 退货、总出货量与退货率明细")
-                
-                search_rtv_sku = st.text_input("🔍 快速搜索退货 SKU 或产品名称:", "")
-                filtered_rtv_summary = sku_rtv_summary.copy()
-                
+                st.divider()
+
+                # KPI 汇总卡片
+                rk1, rk2, rk3, rk4 = st.columns(4)
+                rk1.metric("📦 累计退货件数", f"{int(rtv_df['QTY'].sum()):,} 件")
+                rk2.metric("💵 退货货值 (Total Cost)", f"${rtv_df['Total Cost'].sum():,.2f}")
+                rk3.metric("🚚 10% 运费扣款", f"${rtv_df['10%运费'].sum():,.2f}")
+                rk4.metric("💥 累计总扣款", f"${rtv_df['总扣款'].sum():,.2f}")
+
+                st.divider()
+
+                # 交互筛选与数据表展示
+                st.subheader("📋 SKU 退货明细数据表")
+                s1, s2 = st.columns([2, 2])
+                with s1:
+                    search_rtv_sku = st.text_input("🔍 搜索特定 SKU / 产品名称:", "")
+                with s2:
+                    if "按月份" in time_granularity and 'YearMonth' in sku_rtv_summary.columns:
+                        month_filter = st.multiselect("筛选月份:", options=sorted(sku_rtv_summary['YearMonth'].unique()), default=sorted(sku_rtv_summary['YearMonth'].unique()))
+                        sku_rtv_summary = sku_rtv_summary[sku_rtv_summary['YearMonth'].isin(month_filter)]
+                    elif "按季度" in time_granularity and 'YearQuarter' in sku_rtv_summary.columns:
+                        quarter_filter = st.multiselect("筛选季度:", options=sorted(sku_rtv_summary['YearQuarter'].unique()), default=sorted(sku_rtv_summary['YearQuarter'].unique()))
+                        sku_rtv_summary = sku_rtv_summary[sku_rtv_summary['YearQuarter'].isin(quarter_filter)]
+
                 if search_rtv_sku:
-                    filtered_rtv_summary = filtered_rtv_summary[
-                        filtered_rtv_summary[rtv_sku_col].astype(str).str.contains(search_rtv_sku, case=False) |
-                        filtered_rtv_summary['产品名称'].astype(str).str.contains(search_rtv_sku, case=False)
+                    sku_rtv_summary = sku_rtv_summary[
+                        sku_rtv_summary[rtv_sku_col].astype(str).str.contains(search_rtv_sku, case=False) |
+                        sku_rtv_summary['产品名称'].astype(str).str.contains(search_rtv_sku, case=False)
                     ]
 
                 st.dataframe(
-                    filtered_rtv_summary,
+                    sku_rtv_summary,
                     column_config={
                         "退货货值": st.column_config.NumberColumn("退货货值", format="$%.2f"),
                         "运费扣款": st.column_config.NumberColumn("运费扣款", format="$%.2f"),
                         "总扣款金额": st.column_config.NumberColumn("总扣款金额", format="$%.2f"),
-                        "总出货销量": st.column_config.NumberColumn("总出货销量", format="%d 件"),
+                        "总出货销量": st.column_config.NumberColumn("对应区间出货量", format="%d 件"),
                         "退货率": st.column_config.NumberColumn("退货率", format="%.2f%%"),
                     },
                     use_container_width=True, hide_index=True
@@ -467,35 +538,46 @@ if uploaded_sales_file is not None:
 
                 st.divider()
 
+                # 趋势图与排行榜图表
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
-                    st.subheader("🔥 TOP 10 扣款金额最高 SKU")
+                    st.subheader("📊 SKU 扣款金额排行榜")
                     fig_top_deduct = px.bar(
                         sku_rtv_summary.head(10),
                         x=rtv_sku_col, y='总扣款金额',
-                        color='退货总件数', text_auto='.2s',
+                        color='退货率', text_auto='.2s',
                         title="总扣款金额 TOP 10 SKU",
                         labels={'总扣款金额': '扣款金额 ($)', rtv_sku_col: 'SKU'}
                     )
                     st.plotly_chart(fig_top_deduct, use_container_width=True)
 
                 with c_chart2:
-                    st.subheader("⚠️ TOP 10 退货率最高 SKU")
-                    high_rate_skus = sku_rtv_summary[sku_rtv_summary['总出货销量'] > 0].sort_values('退货率', ascending=False).head(10)
-                    if not high_rate_skus.empty:
-                        fig_top_rate = px.bar(
-                            high_rate_skus,
-                            x=rtv_sku_col, y='退货率',
-                            color='退货总件数', text_auto='.2f',
-                            title="退货率 TOP 10 SKU (%)",
-                            labels={'退货率': '退货率 (%)', rtv_sku_col: 'SKU'}
-                        )
-                        st.plotly_chart(fig_top_rate, use_container_width=True)
-                    else:
-                        st.warning("暂无包含总销量的数据，请上传总出单表以渲染退货率排行榜。")
+                    st.subheader("📈 退货率/退货量 趋势对比图")
+                    if "按整体" not in time_granularity:
+                        time_col = 'YearMonth' if 'YearMonth' in sku_rtv_summary.columns else 'YearQuarter'
+                        trend_rtv = sku_rtv_summary.groupby(time_col).agg(
+                            退货件数=('退货总件数', 'sum'),
+                            出货销量=('总出货销量', 'sum')
+                        ).reset_index()
+                        trend_rtv['周期退货率'] = trend_rtv.apply(lambda r: (r['退货件数']/r['出货销量']*100) if r['出货销量']>0 else 0, axis=1)
 
+                        fig_trend = px.line(
+                            trend_rtv, x=time_col, y=['周期退货率', '退货件数'],
+                            markers=True, title=f"不同 {time_granularity.split(' ')[0]} 整体退货趋势"
+                        )
+                        st.plotly_chart(fig_trend, use_container_width=True)
+                    else:
+                        high_rate_skus = sku_rtv_summary[sku_rtv_summary['总出货销量'] > 0].sort_values('退货率', ascending=False).head(10)
+                        if not high_rate_skus.empty:
+                            fig_top_rate = px.bar(
+                                high_rate_skus, x=rtv_sku_col, y='退货率',
+                                color='退货总件数', text_auto='.2f', title="退货率 TOP 10 SKU (%)"
+                            )
+                            st.plotly_chart(fig_top_rate, use_container_width=True)
+                        else:
+                            st.warning("暂无足够出货数据进行退货率排行榜分析。")
         else:
-            st.info("💡 请在左侧侧边栏上传退货数据表以开启 SKU 深度退货分析。")
+            st.info("💡 请在左侧侧边栏上传退货数据表以开启多维度退货分析。")
 
 else:
     st.info("💡 请在左侧边栏上传 CSV 或 Excel 格式的销售数据表。")
