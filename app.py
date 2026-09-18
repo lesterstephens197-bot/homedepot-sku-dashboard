@@ -53,28 +53,80 @@ def calc_kpis(data_df):
     aov = sales / orders if orders > 0 else 0
     return sales, qty, orders, aov
 
+# 退货看板渲染函数
+def render_rtv_dashboard(rtv_file):
+    rtv_df = load_rtv_data(rtv_file)
+    
+    # 退货 KPI 卡片
+    r_tot_cost = rtv_df['Total Cost'].sum() if 'Total Cost' in rtv_df.columns else 0
+    r_deduct = rtv_df['总扣款'].sum() if '总扣款' in rtv_df.columns else 0
+    r_qty = rtv_df['QTY'].sum() if 'QTY' in rtv_df.columns else 0
+    r_shipping = rtv_df['10%运费'].sum() if '10%运费' in rtv_df.columns else 0
+    
+    rk1, rk2, rk3, rk4 = st.columns(4)
+    rk1.metric("💸 退货总货值", f"${r_tot_cost:,.2f}")
+    rk2.metric("🛑 总扣款金额", f"${r_deduct:,.2f}")
+    rk3.metric("🚚 运费扣款", f"${r_shipping:,.2f}")
+    rk4.metric("📦 退货总件数", f"{int(r_qty):,} 件")
+    
+    st.divider()
+
+    # SKU 退货黑榜分析
+    if '产品SKU' in rtv_df.columns:
+        st.subheader("🏆 SKU 退货黑榜 (按总扣款额)")
+        rtv_sku = rtv_df.groupby('产品SKU').agg(
+            产品名称=('产品名称', 'first') if '产品名称' in rtv_df.columns else ('产品SKU', 'first'),
+            退货件数=('QTY', 'sum'),
+            10百分之运费=('10%运费', 'sum'),
+            总扣款=('总扣款', 'sum'),
+            退货次数=('RTV Number', 'nunique') if 'RTV Number' in rtv_df.columns else ('产品SKU', 'count')
+        ).reset_index().sort_values(by='总扣款', ascending=False)
+        
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            fig_rtv_bar = px.bar(rtv_sku.head(10), x='产品SKU', y='总扣款', color='退货件数', text_auto='.2s', title="退货扣款 Top 10 SKU")
+            st.plotly_chart(fig_rtv_bar, use_container_width=True)
+        with c2:
+            if 'Reason' in rtv_df.columns:
+                reason_pie = px.pie(rtv_df.groupby('Reason')['QTY'].sum().reset_index(), names='Reason', values='QTY', title="退货原因占比", hole=0.4)
+                st.plotly_chart(reason_pie, use_container_width=True)
+
+        st.subheader("📋 SKU 退货扣款明细")
+        st.dataframe(
+            rtv_sku,
+            column_config={
+                "10百分之运费": st.column_config.NumberColumn("10%运费扣款", format="$%.2f"),
+                "总扣款": st.column_config.NumberColumn("总扣款金额", format="$%.2f"),
+            },
+            use_container_width=True, 
+            hide_index=True
+        )
+
 # =========================================================================
-# 3. 侧边栏文件上传（含销售与退货入口）
+# 3. 侧边栏文件上传
 # =========================================================================
 st.sidebar.header("📁 数据导入")
 sales_file = st.sidebar.file_uploader("1️⃣ 上传销售数据表 (CSV/XLSX)", type=["csv", "xlsx"])
 rtv_file = st.sidebar.file_uploader("2️⃣ 上传退货数据表 (CSV/XLSX)", type=["csv", "xlsx"])
 
-# 4. 主界面 Tab 构建
-tab_total, tab_op, tab_sku_rank, tab_hd, tab_rtv = st.tabs([
-    "📊 核心总销售看板", 
-    "👤 分运营销售数据", 
-    "🏆 SKU 排名与等级",
-    "🏪 HD 门店 vs 个人地址",
-    "🔄 RTV 退货分析看板"
-])
+# 4. 智能路由渲染
+if sales_file is None and rtv_file is not None:
+    # 情况 1：只上传了退货表，直接全屏展示退货看板
+    st.subheader("🔄 RTV 退货分析看板")
+    render_rtv_dashboard(rtv_file)
 
-# -------------------------------------------------------------------------
-# 销售看板逻辑 (仅当上传了销售表时渲染)
-# -------------------------------------------------------------------------
-if sales_file is not None:
+elif sales_file is not None:
+    # 情况 2：上传了销售表（或两者都上传了），显示多页签 Tab
     df = load_sales_data(sales_file)
     
+    tab_total, tab_op, tab_sku_rank, tab_hd, tab_rtv = st.tabs([
+        "📊 核心总销售看板", 
+        "👤 分运营销售数据", 
+        "🏆 SKU 排名与等级",
+        "🏪 HD 门店 vs 个人地址",
+        "🔄 RTV 退货分析看板"
+    ])
+
     with tab_total:
         st.header("📊 核心总销售看板")
         if 'Order Date' in df.columns and not df['Order Date'].isna().all():
@@ -120,41 +172,13 @@ if sales_file is not None:
         addr = df['ShipTo Address1'].astype(str) if 'ShipTo Address1' in df.columns else pd.Series(['']*len(df))
         df['地址类型'] = df.apply(lambda r: 'HD门店' if 'c/o thd ship to store' in addr.loc[r.name].lower() else '个人地址', axis=1)
         st.dataframe(df.groupby('地址类型')['Total Cost'].sum().reset_index(), use_container_width=True)
+
+    with tab_rtv:
+        st.header("🔄 RTV 退货分析看板")
+        if rtv_file is not None:
+            render_rtv_dashboard(rtv_file)
+        else:
+            st.info("👈 请在侧边栏上传【2️⃣ 上传退货数据表】以查看退货分析。")
+
 else:
-    with tab_total:
-        st.info("👈 请在左侧侧边栏上传【销售数据表】以查看销售分析。")
-
-# -------------------------------------------------------------------------
-# 退货看板逻辑 (仅当上传了退货表时渲染)
-# -------------------------------------------------------------------------
-with tab_rtv:
-    st.header("🔄 RTV 产品退货与扣款分析")
-    if rtv_file is not None:
-        rtv_df = load_rtv_data(rtv_file)
-        
-        # 退货 KPI 卡片
-        r_tot_cost = rtv_df['Total Cost'].sum() if 'Total Cost' in rtv_df.columns else 0
-        r_deduct = rtv_df['总扣款'].sum() if '总扣款' in rtv_df.columns else 0
-        r_qty = rtv_df['QTY'].sum() if 'QTY' in rtv_df.columns else 0
-        
-        rk1, rk2, rk3 = st.columns(3)
-        rk1.metric("退货总货值", f"${r_tot_cost:,.2f}")
-        rk2.metric("总扣款金额", f"${r_deduct:,.2f}")
-        rk3.metric("退货总件数", f"{int(r_qty):,} 件")
-        
-        st.divider()
-
-        # SKU 退货黑榜
-        if '产品SKU' in rtv_df.columns:
-            st.subheader("🏆 SKU 退货黑榜")
-            rtv_sku = rtv_df.groupby('产品SKU').agg(
-                退货件数=('QTY', 'sum'),
-                总扣款=('总扣款', 'sum'),
-                退货次数=('RTV Number', 'nunique') if 'RTV Number' in rtv_df.columns else ('产品SKU', 'count')
-            ).reset_index().sort_values(by='总扣款', ascending=False)
-            
-            fig_rtv_bar = px.bar(rtv_sku.head(10), x='产品SKU', y='总扣款', text_auto='.2s', title="退货扣款 Top 10 SKU")
-            st.plotly_chart(fig_rtv_bar, use_container_width=True)
-            st.dataframe(rtv_sku, use_container_width=True, hide_index=True)
-    else:
-        st.info("👈 请在左侧侧边栏上传【RTV 退货数据表】以查看退货分析。")
+    st.info("💡 请在左侧侧边栏上传【销售数据表】或【退货数据表】。")
