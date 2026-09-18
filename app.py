@@ -132,19 +132,23 @@ if uploaded_file is not None:
                                      .merge(q_15d, on=sku_col, how='left')\
                                      .merge(q_prior_15d, on=sku_col, how='left').fillna(0)
 
-            # 计算环比变化率
+            # 【修复点】：使用 sku_metrics 计算 7天/15天 增量与环比
             sku_metrics['7天销量增量'] = sku_metrics['近7天销量'] - sku_metrics['上个7天销量']
-            sku_metrics['7天销量环比'] = df.apply(
+            sku_metrics['7天销量环比'] = sku_metrics.apply(
                 lambda r: 0 if r['上个7天销量'] == 0 else (r['近7天销量'] - r['上个7天销量']) / r['上个7天销量'], 
                 axis=1
-            ) if '上个7天销量' in sku_metrics.columns else (sku_metrics['近7天销量'] - sku_metrics['上个7天销量']) / sku_metrics['上个7天销量'].replace(0, 1)
+            )
 
             sku_metrics['15天销量增量'] = sku_metrics['近15天销量'] - sku_metrics['上个15天销量']
+            sku_metrics['15天销量环比'] = sku_metrics.apply(
+                lambda r: 0 if r['上个15天销量'] == 0 else (r['近15天销量'] - r['上个15天销量']) / r['上个15天销量'], 
+                axis=1
+            )
             
             # 格式化展示表格
             st.subheader("📊 SKU 动销及近7天/15天销量对比表")
             
-            # 搜素 SKU
+            # 搜索 SKU
             search_sku = st.text_input("🔍 搜索特定 SKU 或 产品名称", "")
             if search_sku:
                 sku_metrics = sku_metrics[
@@ -159,6 +163,7 @@ if uploaded_file is not None:
                     "最近售出日期": st.column_config.DateColumn("最近售出日期", format="YYYY-MM-DD"),
                     "累计销售额": st.column_config.NumberColumn("累计销售额", format="$%.2f"),
                     "7天销量环比": st.column_config.ProgressColumn("7天销量环比", format="%.1f%%", min_value=-1, max_value=2),
+                    "15天销量环比": st.column_config.ProgressColumn("15天销量环比", format="%.1f%%", min_value=-1, max_value=2),
                 },
                 use_container_width=True,
                 hide_index=True
