@@ -131,7 +131,7 @@ if uploaded_sales_file is not None:
         "👤 2. 分运营销售数据看板", 
         "🏆 3. 产品 SKU 排名与动销分析",
         "🏪 4. HD 门店 vs 个人地址占比",
-        "🔄 5. 退货与扣款 (SKU 维度修正版)"
+        "🔄 5. 退货与扣款 (SKU 维度分析)"
     ])
 
     # -------------------------------------------------------------------------
@@ -304,7 +304,6 @@ if uploaded_sales_file is not None:
         name_col = '产品名称' if '产品名称' in df.columns else 'Description'
 
         if sku_col in df.columns:
-            # 计算全域或所选范围的动销跨度天数
             total_days_range = max((df['Order Date'].max() - df['Order Date'].min()).days + 1, 1) if 'Order Date' in df.columns else 1
 
             sku_rank_df = df.groupby(sku_col).agg(
@@ -319,7 +318,6 @@ if uploaded_sales_file is not None:
                 最近出货日期=('Order Date', 'max') if 'Order Date' in df.columns else (sku_col, 'first')
             ).reset_index()
 
-            # 动销指标计算
             sku_rank_df['日均销量(件/天)'] = (sku_rank_df['总销量'] / total_days_range).round(2)
             sku_rank_df['动销出货天数'] = sku_rank_df['有销售天数']
 
@@ -340,7 +338,6 @@ if uploaded_sales_file is not None:
 
             sku_rank_df['SKU 等级'] = sku_rank_df['累计销售额占比'].apply(assign_grade)
 
-            # TOP 10 动销速度排行榜
             st.subheader("🚀 SKU 动销速度 (日均销量) TOP 10")
             top_velocity = sku_rank_df.sort_values('日均销量(件/天)', ascending=False).head(10)
             fig_velocity = px.bar(
@@ -401,7 +398,8 @@ if uploaded_sales_file is not None:
         hd_sales = hd_df['Total Cost'].sum() if 'Total Cost' in hd_df.columns else 0
 
         home_orders = home_df['PO Number'].nunique() if 'PO Number' in home_df.columns else len(home_df)
-        home_sales = home_df['Total Cost'].sum() if 'Total Cost' in home_sales.columns else 0
+        # 【已修复 Bug】：此处使用 home_df.columns 判断
+        home_sales = home_df['Total Cost'].sum() if 'Total Cost' in home_df.columns else 0
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("HD 门店订单量占比", f"{(hd_orders/tot_orders_all*100):.2f}%", f"{hd_orders:,} 单")
@@ -432,14 +430,12 @@ if uploaded_sales_file is not None:
         st.header("🔄 退货与扣款 (产品 SKU 深度分析看板)")
         
         if rtv_df is not None and not rtv_df.empty:
-            # 1. 退货表 SKU 列辨识
             rtv_sku_col = '产品SKU' if '产品SKU' in rtv_df.columns else ('PART#' if 'PART#' in rtv_df.columns else ('SKU' if 'SKU' in rtv_df.columns else None))
             rtv_name_col = '产品名称' if '产品名称' in rtv_df.columns else rtv_sku_col
 
             if not rtv_sku_col:
                 st.error("⚠️ 未在退货表格中找到 SKU 列 (如 'PART#', 'SKU', '产品SKU')，请核对表头。")
             else:
-                # 2. 核心 KPI 汇总
                 total_rtv_qty = rtv_df['QTY'].sum()
                 total_rtv_cost = rtv_df['Total Cost'].sum()
                 total_shipping_fee = rtv_df['10%运费'].sum()
@@ -453,11 +449,9 @@ if uploaded_sales_file is not None:
 
                 st.divider()
 
-                # 3. 解决退货率与总销量计算问题的配置区
                 st.subheader("⚙️ SKU 出货量与退货率匹配设置")
-                st.info("💡 如果退货表中缺少订单出货总量，系统将默认利用已上传的销售主表自动匹配。如名称不一致，可在下方手动关联或映射。")
+                st.info("💡 如果退货表中缺少订单出货总量，系统将默认利用已上传的销售主表自动匹配。")
 
-                # 获取销售表 SKU 识别列
                 sales_sku_col = '产品SKU' if '产品SKU' in df.columns else ('Merchant SKU' if 'Merchant SKU' in df.columns else ('Vendor SKU' if 'Vendor SKU' in df.columns else None))
 
                 sku_rtv_summary = rtv_df.groupby(rtv_sku_col).agg(
@@ -470,7 +464,6 @@ if uploaded_sales_file is not None:
                     主要退货原因=('Reason', lambda x: x.mode()[0] if not x.empty else '未知') if 'Reason' in rtv_df.columns else (rtv_sku_col, lambda x: '未知')
                 ).reset_index()
 
-                # 尝试从全局销售表匹配销量
                 if sales_sku_col and sales_sku_col in df.columns:
                     sales_qty_df = df.groupby(sales_sku_col)['Quantity'].sum().reset_index()
                     sales_qty_df.columns = [rtv_sku_col, '总出货销量']
@@ -480,14 +473,12 @@ if uploaded_sales_file is not None:
                 else:
                     sku_rtv_summary['总出货销量'] = 0
 
-                # 计算退货率 (%)
                 sku_rtv_summary['退货率'] = sku_rtv_summary.apply(
                     lambda r: (r['退货总件数'] / r['总出货销量'] * 100) if r['总出货销量'] > 0 else 0, axis=1
                 )
 
                 sku_rtv_summary = sku_rtv_summary.sort_values('总扣款金额', ascending=False)
 
-                # 4. 全量 SKU 透视明细表
                 st.subheader("🏷️ 全量 SKU 退货、总出货量与退货率明细")
                 
                 search_rtv_sku = st.text_input("🔍 快速搜索退货 SKU 或产品名称:", "")
@@ -513,7 +504,6 @@ if uploaded_sales_file is not None:
 
                 st.divider()
 
-                # 5. TOP 排行榜与动销退货诊断
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.subheader("🔥 TOP 10 扣款金额最高 SKU")
