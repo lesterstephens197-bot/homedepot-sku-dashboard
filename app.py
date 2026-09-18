@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("📈 进阶销售数据分析看板")
-st.caption("聚焦 SKU 动销分析、产品地域分布与客户复购行为深度挖掘")
+st.caption("聚焦 SKU 动销分析、产品地域分布与 HD 门店 vs 个人地址渠道对比分析")
 
 # 2. 数据加载与清洗
 @st.cache_data
@@ -73,10 +73,10 @@ if uploaded_file is not None:
             df = df[df['运营'] == selected_operator]
 
     # 选项卡切换三大深度板块
-    tab_sku, tab_geo, tab_repeat = st.tabs([
+    tab_sku, tab_geo, tab_hd = st.tabs([
         "🚀 1. SKU 动销与近况分析", 
         "🗺️ 2. 产品-地区/州分布分析", 
-        "🔄 3. 客户复购率深度看板"
+        "🏪 3. HD 门店 vs 个人地址占比分析"
     ])
 
     # =========================================================================
@@ -132,7 +132,6 @@ if uploaded_file is not None:
                                      .merge(q_15d, on=sku_col, how='left')\
                                      .merge(q_prior_15d, on=sku_col, how='left').fillna(0)
 
-            # 【修复点】：使用 sku_metrics 计算 7天/15天 增量与环比
             sku_metrics['7天销量增量'] = sku_metrics['近7天销量'] - sku_metrics['上个7天销量']
             sku_metrics['7天销量环比'] = sku_metrics.apply(
                 lambda r: 0 if r['上个7天销量'] == 0 else (r['近7天销量'] - r['上个7天销量']) / r['上个7天销量'], 
@@ -259,98 +258,116 @@ if uploaded_file is not None:
             st.warning("数据表中缺少 `产品名称`/`Description` 或 `ShipTo State`/`ShipTo Country` 字段。")
 
     # =========================================================================
-    # TAB 3: 复购率分析看板
+    # TAB 3: HD 门店 vs 个人地址占比分析
     # =========================================================================
-    with tab_repeat:
-        st.header("🔄 客户复购率与客户生命周期分析")
+    with tab_hd:
+        st.header("🏪 HD 门店 vs 个人地址 渠道对比分析")
+        st.caption("基于 `ShipTo Address1` 和 `ShipTo Address2` 中包含 `C/O THD Ship to Store #` 的关键字识别 HD 门店订单")
 
-        # 判定客户唯一标识 (优先选择 电话 > 姓名+地址 > 姓名)
-        if 'ShipTo Day Phone' in df.columns and df['ShipTo Day Phone'].notna().sum() > 0:
-            user_id_col = 'ShipTo Day Phone'
-        elif 'ShipTo Name' in df.columns:
-            user_id_col = 'ShipTo Name'
-        elif 'ShipTo Address1' in df.columns:
-            user_id_col = 'ShipTo Address1'
+        addr1 = df['ShipTo Address1'].astype(str) if 'ShipTo Address1' in df.columns else pd.Series(['']*len(df))
+        addr2 = df['ShipTo Address2'].astype(str) if 'ShipTo Address2' in df.columns else pd.Series(['']*len(df))
+
+        # 匹配规则：同时检测 Address1 和 Address2
+        keyword_pattern = r'c/o\s*thd\s*ship\s*to\s*store'
+        is_hd_store = addr1.str.contains(keyword_pattern, case=False, regex=True) | \
+                      addr2.str.contains(keyword_pattern, case=False, regex=True)
+
+        df['地址类型'] = df.apply(lambda r: 'HD门店 (Ship to Store)' if is_hd_store.loc[r.name] else '个人地址 (Home Delivery)', axis=1)
+
+        # 1. 核心 KPI 汇总
+        total_orders = df['PO Number'].nunique() if 'PO Number' in df.columns else len(df)
+        total_sales = df['Total Cost'].sum() if 'Total Cost' in df.columns else 0
+
+        hd_df = df[df['地址类型'] == 'HD门店 (Ship to Store)']
+        home_df = df[df['地址类型'] == '个人地址 (Home Delivery)']
+
+        hd_orders = hd_df['PO Number'].nunique() if 'PO Number' in hd_df.columns else len(hd_df)
+        hd_sales = hd_df['Total Cost'].sum() if 'Total Cost' in hd_df.columns else 0
+
+        home_orders = home_df['PO Number'].nunique() if 'PO Number' in home_df.columns else len(home_df)
+        home_sales = home_df['Total Cost'].sum() if 'Total Cost' in home_df.columns else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("HD 门店订单量占比", f"{(hd_orders/total_orders*100):.2f}%", f"{hd_orders:,} 单")
+        k2.metric("HD 门店销售额占比", f"{(hd_sales/total_sales*100):.2f}%", f"${hd_sales:,.2f}")
+        k3.metric("个人地址订单量占比", f"{(home_orders/total_orders*100):.2f}%", f"{home_orders:,} 单")
+        k4.metric("个人地址销售额占比", f"{(home_sales/total_sales*100):.2f}%", f"${home_sales:,.2f}")
+
+        st.divider()
+
+        # 2. 占比图表展示
+        c_pie1, c_pie2 = st.columns(2)
+        with c_pie1:
+            st.subheader("📊 订单量分布占比")
+            order_summary = df.groupby('地址类型')['PO Number'].nunique().reset_index() if 'PO Number' in df.columns else df['地址类型'].value_counts().reset_index()
+            order_summary.columns = ['地址类型', '订单量']
+            fig_order_pie = px.pie(order_summary, names='地址类型', values='订单量', title="HD 门店 vs 个人地址 订单数占比", hole=0.4)
+            st.plotly_chart(fig_order_pie, use_container_width=True)
+
+        with c_pie2:
+            st.subheader("💰 销售额分布占比")
+            sales_summary = df.groupby('地址类型')['Total Cost'].sum().reset_index() if 'Total Cost' in df.columns else pd.DataFrame()
+            fig_sales_pie = px.pie(sales_summary, names='地址类型', values='Total Cost', title="HD 门店 vs 个人地址 销售额占比", hole=0.4)
+            st.plotly_chart(fig_sales_pie, use_container_width=True)
+
+        st.divider()
+
+        # 3. HD 门店订单的州/地区分布（哪个州的门店买最多）
+        st.subheader("🗺️ 哪个州的 HD 门店采购量最大？")
+        state_col = 'ShipTo State' if 'ShipTo State' in df.columns else 'ShipTo Country'
+
+        if state_col in hd_df.columns and not hd_df.empty:
+            col_st1, col_st2 = st.columns([2, 1])
+
+            hd_state_df = hd_df.groupby(state_col).agg(
+                门店订单量=('PO Number', 'nunique') if 'PO Number' in hd_df.columns else (state_col, 'count'),
+                门店销量=('Quantity', 'sum') if 'Quantity' in hd_df.columns else (state_col, 'count'),
+                门店销售额=('Total Cost', 'sum') if 'Total Cost' in hd_df.columns else (state_col, 'count')
+            ).reset_index().sort_values(by='门店订单量', ascending=False)
+
+            with col_st1:
+                fig_hd_state = px.bar(
+                    hd_state_df.head(15), 
+                    x=state_col, 
+                    y='门店订单量',
+                    color='门店销售额',
+                    text_auto=True,
+                    title="Top 15 HD 门店订单量最高州排行榜"
+                )
+                st.plotly_chart(fig_hd_state, use_container_width=True)
+
+            with col_st2:
+                st.write("📌 **HD 门店采购前 10 州明细**")
+                st.dataframe(
+                    hd_state_df.head(10),
+                    column_config={
+                        "门店销售额": st.column_config.NumberColumn("门店销售额", format="$%.2f")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
         else:
-            user_id_col = None
+            st.info("数据中未检索到符合 `C/O THD Ship to Store #` 的 HD 门店订单。")
 
-        order_id_col = 'Customer Order Number' if 'Customer Order Number' in df.columns else 'PO Number'
+        # 4. 采购量最高的 Top 10 具体 HD 门店
+        st.divider()
+        st.subheader("🏬 采购量最高的具体 HD 门店 Top 10")
+        if not hd_df.empty:
+            # 合并完整地址
+            hd_df['完整门店地址'] = hd_df['ShipTo Address1'].fillna('') + " " + hd_df['ShipTo Address2'].fillna('')
+            top_stores = hd_df.groupby(['ShipTo State', '完整门店地址']).agg(
+                订单量=('PO Number', 'nunique') if 'PO Number' in hd_df.columns else ('完整门店地址', 'count'),
+                销售额=('Total Cost', 'sum') if 'Total Cost' in hd_df.columns else ('完整门店地址', 'count')
+            ).reset_index().sort_values(by='订单量', ascending=False).head(10)
 
-        if user_id_col and order_id_col in df.columns:
-            st.info(f"💡 当前判定唯一客户的依据字段为: **`{user_id_col}`**；订单判定依据字段为: **`{order_id_col}`**")
-
-            # 1. 客户粒度聚合计算
-            cust_df = df.groupby(user_id_col).agg(
-                订单次数=(order_id_col, 'nunique'),
-                消费总金额=('Total Cost', 'sum') if 'Total Cost' in df.columns else (order_id_col, 'count'),
-                购买总件数=('Quantity', 'sum') if 'Quantity' in df.columns else (order_id_col, 'count'),
-                首次购买时间=('Order Date', 'min') if 'Order Date' in df.columns else (order_id_col, 'min'),
-                最近购买时间=('Order Date', 'max') if 'Order Date' in df.columns else (order_id_col, 'max')
-            ).reset_index()
-
-            total_customers = len(cust_df)
-            repeat_customers = len(cust_df[cust_df['订单次数'] > 1])
-            repeat_rate = (repeat_customers / total_customers * 100) if total_customers > 0 else 0
-
-            # 消费金额占比（复购客户贡献金额 vs 单次客户贡献金额）
-            repeat_users_list = cust_df[cust_df['订单次数'] > 1][user_id_col]
-            repeat_sales = df[df[user_id_col].isin(repeat_users_list)]['Total Cost'].sum() if 'Total Cost' in df.columns else 0
-            total_sales_all = df['Total Cost'].sum() if 'Total Cost' in df.columns else 0
-            repeat_sales_ratio = (repeat_sales / total_sales_all * 100) if total_sales_all > 0 else 0
-
-            # 展示核心复购 KPI
-            rc1, rc2, rc3, rc4 = st.columns(4)
-            rc1.metric("总客户数 (Unique Users)", f"{total_customers:,}")
-            rc2.metric("复购客户数 (Repeat Users)", f"{repeat_customers:,}")
-            rc3.metric("客户整体复购率", f"{repeat_rate:.2f}%")
-            rc4.metric("复购客户销售额贡献占比", f"{repeat_sales_ratio:.2f}%")
-
-            st.divider()
-
-            # 图表分析：购买次数分布与复购时间间隔
-            col_rep1, col_rep2 = st.columns(2)
-
-            with col_rep1:
-                st.subheader("📊 客户购买频次分布")
-                freq_df = cust_df['订单次数'].value_counts().reset_index()
-                freq_df.columns = ['购买次数', '客户数量']
-                freq_df['购买次数类型'] = freq_df['购买次数'].apply(lambda x: f"{x}次" if x < 5 else "5次及以上")
-                
-                freq_summary = freq_df.groupby('购买次数类型')['客户数量'].sum().reset_index()
-                fig_freq = px.pie(freq_summary, names='购买次数类型', values='客户数量', title="客户购买次数比例 (占比分布)", hole=0.4)
-                st.plotly_chart(fig_freq, use_container_width=True)
-
-            with col_rep2:
-                st.subheader("⏱️ 复购周期 (再次下单平均间隔天数)")
-                if 'Order Date' in df.columns:
-                    # 仅筛选复购订单并按时间和客户排序计算 diff
-                    df_sorted = df.sort_values(by=[user_id_col, 'Order Date'])
-                    df_sorted['prev_order_date'] = df_sorted.groupby(user_id_col)['Order Date'].shift(1)
-                    df_sorted['days_between_orders'] = (df_sorted['Order Date'] - df_sorted['prev_order_date']).dt.days
-
-                    repeat_intervals = df_sorted[df_sorted['days_between_orders'] > 0]['days_between_orders']
-                    avg_days = repeat_intervals.mean() if len(repeat_intervals) > 0 else 0
-
-                    st.metric("平均再次购买间隔", f"{avg_days:.1f} 天")
-
-                    fig_hist = px.histogram(
-                        repeat_intervals, 
-                        nbins=20, 
-                        labels={'value': '间隔天数'},
-                        title="复购间隔天数分布直方图"
-                    )
-                    st.plotly_chart(fig_hist, use_container_width=True)
-
-            # 复购高价值客户 (VIP) 列表
-            st.subheader("👑 核心复购高价值客户列表 (Top 20)")
             st.dataframe(
-                cust_df[cust_df['订单次数'] > 1].sort_values(by='消费总金额', ascending=False).head(20),
+                top_stores,
+                column_config={
+                    "销售额": st.column_config.NumberColumn("销售额", format="$%.2f")
+                },
                 use_container_width=True,
                 hide_index=True
             )
-
-        else:
-            st.warning("数据表中缺少用于判定客户的唯一标识字段（如 `ShipTo Day Phone` / `ShipTo Name`）或订单编号 `PO Number`。")
 
 else:
     st.info("💡 请在左侧边栏上传 CSV 或 Excel 销售数据表。")
