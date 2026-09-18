@@ -75,14 +75,13 @@ def load_return_data(uploaded_file):
 
     return df
 
-# KPI 指标通用计算函数（含动销指标）
+# KPI 指标通用计算函数
 def calc_kpis(data_df, period_days=None):
     sales = data_df['Total Cost'].sum() if 'Total Cost' in data_df.columns else 0
     qty = data_df['Quantity'].sum() if 'Quantity' in data_df.columns else 0
     orders = data_df['PO Number'].nunique() if 'PO Number' in data_df.columns else len(data_df)
     aov = sales / orders if orders > 0 else 0
     
-    # 动销计算
     if period_days and period_days > 0:
         days = period_days
     elif 'Order Date' in data_df.columns and not data_df['Order Date'].isna().all():
@@ -99,13 +98,18 @@ def calc_kpis(data_df, period_days=None):
 # 3. 侧边栏：文件上传与全局筛选
 # =========================================================================
 st.sidebar.header("📁 数据导入")
-uploaded_sales_file = st.sidebar.file_uploader("1. 上传销售数据表 (CSV/Excel)", type=["csv", "xlsx"], key="sales_uploader")
+uploaded_sales_file = st.sidebar.file_uploader("1. 上传销售分析数据表 (CSV/Excel)", type=["csv", "xlsx"], key="sales_uploader")
 uploaded_return_file = st.sidebar.file_uploader("2. 上传退货数据表 (CSV/Excel)", type=["csv", "xlsx"], key="return_uploader")
+# 新增：独立上传全量总出单表，用于匹配 RTV 退货率
+uploaded_total_orders_file = st.sidebar.file_uploader("3. 上传全量总出单表 (CSV/Excel) [选填，用于匹配 RTV]", type=["csv", "xlsx"], key="total_orders_uploader")
 
 if uploaded_sales_file is not None:
     raw_df = load_sales_data(uploaded_sales_file)
     df = raw_df.dropna(subset=['Order Date']).copy() if 'Order Date' in raw_df.columns else raw_df.copy()
     rtv_df = load_return_data(uploaded_return_file) if uploaded_return_file is not None else None
+    
+    # 加载全量总出单表数据
+    total_orders_df = load_sales_data(uploaded_total_orders_file) if uploaded_total_orders_file is not None else None
 
     st.sidebar.subheader("🔍 全局维度筛选")
     
@@ -241,8 +245,6 @@ if uploaded_sales_file is not None:
                 markers=True
             )
             st.plotly_chart(fig_trend, use_container_width=True)
-        else:
-            st.warning("数据集中未包含有效的 `Order Date` 日期字段。")
 
     # -------------------------------------------------------------------------
     # TAB 2: 分运营销售数据看板
@@ -290,16 +292,12 @@ if uploaded_sales_file is not None:
                 },
                 use_container_width=True, hide_index=True
             )
-        else:
-            st.warning("数据集中未检测到 `运营` 字段。")
 
     # -------------------------------------------------------------------------
     # TAB 3: 产品 SKU 排名与动销分析
     # -------------------------------------------------------------------------
     with tab_sku_rank:
         st.header("🏆 产品 SKU 综合排名与动销深度分析看板")
-        st.caption("新增 SKU 动销分析：已售天数 (有销售记录的天数)、销售时间跨度、日均销量 (Velocity)")
-
         sku_col = '产品SKU' if '产品SKU' in df.columns else ('Merchant SKU' if 'Merchant SKU' in df.columns else 'Vendor SKU')
         name_col = '产品名称' if '产品名称' in df.columns else 'Description'
 
@@ -313,16 +311,11 @@ if uploaded_sales_file is not None:
                 总销售额=('Total Cost', 'sum'),
                 总销量=('Quantity', 'sum'),
                 总订单数=('PO Number', 'nunique') if 'PO Number' in df.columns else (sku_col, 'count'),
-                有销售天数=('Order Date', lambda x: x.dt.date.nunique()) if 'Order Date' in df.columns else (sku_col, 'count'),
-                首次出货日期=('Order Date', 'min') if 'Order Date' in df.columns else (sku_col, 'first'),
-                最近出货日期=('Order Date', 'max') if 'Order Date' in df.columns else (sku_col, 'first')
+                有销售天数=('Order Date', lambda x: x.dt.date.nunique()) if 'Order Date' in df.columns else (sku_col, 'count')
             ).reset_index()
 
             sku_rank_df['日均销量(件/天)'] = (sku_rank_df['总销量'] / total_days_range).round(2)
-            sku_rank_df['动销出货天数'] = sku_rank_df['有销售天数']
-
             sku_rank_df = sku_rank_df.sort_values(by='总销售额', ascending=False).reset_index(drop=True)
-            sku_rank_df['销售额排名'] = sku_rank_df.index + 1
 
             total_sku_sales = sku_rank_df['总销售额'].sum()
             sku_rank_df['销售额占比'] = (sku_rank_df['总销售额'] / total_sku_sales) if total_sku_sales > 0 else 0
@@ -338,30 +331,8 @@ if uploaded_sales_file is not None:
 
             sku_rank_df['SKU 等级'] = sku_rank_df['累计销售额占比'].apply(assign_grade)
 
-            st.subheader("🚀 SKU 动销速度 (日均销量) TOP 10")
-            top_velocity = sku_rank_df.sort_values('日均销量(件/天)', ascending=False).head(10)
-            fig_velocity = px.bar(
-                top_velocity, x=sku_col, y='日均销量(件/天)',
-                color='总销量', text_auto=True,
-                title="日均销量最高 SKU 排行 (件/天)"
-            )
-            st.plotly_chart(fig_velocity, use_container_width=True)
-
-            st.divider()
-
-            st.subheader("🔝 SKU 综合排名与划分明细表")
-            selected_grade = st.multiselect("按等级筛选:", options=['S/A 级 (核心爆款)', 'B 级 (腰部主力)', 'C 级 (尾部滞销)'], default=['S/A 级 (核心爆款)', 'B 级 (腰部主力)', 'C 级 (尾部滞销)'])
-            filtered_sku_df = sku_rank_df[sku_rank_df['SKU 等级'].isin(selected_grade)]
-
-            search_sku_text = st.text_input("🔍 搜索特定 SKU / 产品名称", "")
-            if search_sku_text:
-                filtered_sku_df = filtered_sku_df[
-                    filtered_sku_df[sku_col].astype(str).str.contains(search_sku_text, case=False) |
-                    filtered_sku_df['产品名称'].astype(str).str.contains(search_sku_text, case=False)
-                ]
-
             st.dataframe(
-                filtered_sku_df,
+                sku_rank_df,
                 column_config={
                     "总销售额": st.column_config.NumberColumn("总销售额", format="$%.2f"),
                     "日均销量(件/天)": st.column_config.NumberColumn("日均销量(件/天)", format="%.2f"),
@@ -370,8 +341,6 @@ if uploaded_sales_file is not None:
                 },
                 use_container_width=True, hide_index=True
             )
-        else:
-            st.warning("数据集中未检测到 SKU 标识字段。")
 
     # -------------------------------------------------------------------------
     # TAB 4: HD 门店 vs 个人地址占比分析
@@ -398,7 +367,6 @@ if uploaded_sales_file is not None:
         hd_sales = hd_df['Total Cost'].sum() if 'Total Cost' in hd_df.columns else 0
 
         home_orders = home_df['PO Number'].nunique() if 'PO Number' in home_df.columns else len(home_df)
-        # 【已修复 Bug】：此处使用 home_df.columns 判断
         home_sales = home_df['Total Cost'].sum() if 'Total Cost' in home_df.columns else 0
 
         k1, k2, k3, k4 = st.columns(4)
@@ -407,24 +375,8 @@ if uploaded_sales_file is not None:
         k3.metric("个人地址订单量占比", f"{(home_orders/tot_orders_all*100):.2f}%", f"{home_orders:,} 单")
         k4.metric("个人地址销售额占比", f"{(home_sales/tot_sales_all*100):.2f}%", f"${home_sales:,.2f}")
 
-        st.divider()
-
-        c_pie1, c_pie2 = st.columns(2)
-        with c_pie1:
-            st.subheader("📊 订单量分布占比")
-            order_summary = df.groupby('地址类型')['PO Number'].nunique().reset_index() if 'PO Number' in df.columns else df['地址类型'].value_counts().reset_index()
-            order_summary.columns = ['地址类型', '订单量']
-            fig_order_pie = px.pie(order_summary, names='地址类型', values='订单量', title="HD 门店 vs 个人地址 订单数占比", hole=0.4)
-            st.plotly_chart(fig_order_pie, use_container_width=True)
-
-        with c_pie2:
-            st.subheader("💰 销售额分布占比")
-            sales_summary = df.groupby('地址类型')['Total Cost'].sum().reset_index() if 'Total Cost' in df.columns else pd.DataFrame()
-            fig_sales_pie = px.pie(sales_summary, names='地址类型', values='Total Cost', title="HD 门店 vs 个人地址 销售额占比", hole=0.4)
-            st.plotly_chart(fig_sales_pie, use_container_width=True)
-
     # -------------------------------------------------------------------------
-    # TAB 5: 退货与扣款 (解决总出货量及退货率计算问题)
+    # TAB 5: 退货与扣款 (适配上传的总出单表表头进行自动匹配)
     # -------------------------------------------------------------------------
     with tab_returns:
         st.header("🔄 退货与扣款 (产品 SKU 深度分析看板)")
@@ -449,10 +401,13 @@ if uploaded_sales_file is not None:
 
                 st.divider()
 
-                st.subheader("⚙️ SKU 出货量与退货率匹配设置")
-                st.info("💡 如果退货表中缺少订单出货总量，系统将默认利用已上传的销售主表自动匹配。")
-
-                sales_sku_col = '产品SKU' if '产品SKU' in df.columns else ('Merchant SKU' if 'Merchant SKU' in df.columns else ('Vendor SKU' if 'Vendor SKU' in df.columns else None))
+                # 判断使用“独立总出单表”还是“销售主表”
+                if total_orders_df is not None:
+                    match_source_df = total_orders_df
+                    st.success("✅ 已检测到独立的【全量总出单表】，正使用其匹配 SKU 出货总量。")
+                else:
+                    match_source_df = df
+                    st.info("💡 未单独上传【全量总出单表】，当前默认使用上传的【销售分析表】匹配 SKU 出货总量。")
 
                 sku_rtv_summary = rtv_df.groupby(rtv_sku_col).agg(
                     产品名称=(rtv_name_col, 'first'),
@@ -464,10 +419,18 @@ if uploaded_sales_file is not None:
                     主要退货原因=('Reason', lambda x: x.mode()[0] if not x.empty else '未知') if 'Reason' in rtv_df.columns else (rtv_sku_col, lambda x: '未知')
                 ).reset_index()
 
-                if sales_sku_col and sales_sku_col in df.columns:
-                    sales_qty_df = df.groupby(sales_sku_col)['Quantity'].sum().reset_index()
+                # 根据指定的表头（产品SKU -> Merchant SKU -> Vendor SKU）识别匹配列
+                target_sales_sku_col = None
+                for col_name in ['产品SKU', 'Merchant SKU', 'Vendor SKU']:
+                    if col_name in match_source_df.columns:
+                        target_sales_sku_col = col_name
+                        break
+
+                if target_sales_sku_col and 'Quantity' in match_source_df.columns:
+                    sales_qty_df = match_source_df.groupby(target_sales_sku_col)['Quantity'].sum().reset_index()
                     sales_qty_df.columns = [rtv_sku_col, '总出货销量']
                     
+                    # 关联计算退货率
                     sku_rtv_summary = pd.merge(sku_rtv_summary, sales_qty_df, on=rtv_sku_col, how='left')
                     sku_rtv_summary['总出货销量'] = sku_rtv_summary['总出货销量'].fillna(0)
                 else:
@@ -496,7 +459,7 @@ if uploaded_sales_file is not None:
                         "退货货值": st.column_config.NumberColumn("退货货值", format="$%.2f"),
                         "运费扣款": st.column_config.NumberColumn("运费扣款", format="$%.2f"),
                         "总扣款金额": st.column_config.NumberColumn("总扣款金额", format="$%.2f"),
-                        "总出货销量": st.column_config.NumberColumn("总出货销量 (全表累计)", format="%d 件"),
+                        "总出货销量": st.column_config.NumberColumn("总出货销量", format="%d 件"),
                         "退货率": st.column_config.NumberColumn("退货率", format="%.2f%%"),
                     },
                     use_container_width=True, hide_index=True
@@ -529,7 +492,7 @@ if uploaded_sales_file is not None:
                         )
                         st.plotly_chart(fig_top_rate, use_container_width=True)
                     else:
-                        st.warning("无有效总销量数据，无法渲染退货率排行榜图表。")
+                        st.warning("暂无包含总销量的数据，请上传总出单表以渲染退货率排行榜。")
 
         else:
             st.info("💡 请在左侧侧边栏上传退货数据表以开启 SKU 深度退货分析。")
