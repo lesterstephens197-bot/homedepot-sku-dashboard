@@ -13,13 +13,13 @@ st.set_page_config(
 )
 
 st.title("📊 电商全景综合销售数据分析看板")
-st.caption("集成核心总销售、近7/15天对比、运营绩效、SKU 帕累托等级划分及渠道地址分析")
+st.caption("集成核心总销售、近7/15天对比、运营绩效、SKU 帕累托等级划分、渠道地址分析及月度退货分析")
 
 # =========================================================================
 # 2. 数据加载与清洗函数
 # =========================================================================
 @st.cache_data
-def load_data(uploaded_file):
+def load_sales_data(uploaded_file):
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file)
     else:
@@ -46,6 +46,44 @@ def load_data(uploaded_file):
         )
     return df
 
+@st.cache_data
+def load_return_data(uploaded_file):
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    
+    # 清洗表头首尾空格
+    df.columns = df.columns.astype(str).str.strip()
+
+    # 退货日期与订单日期解析
+    date_cols = ['RTV Date', 'Order Date']
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+
+    # 提取退货月份 (YYYY-MM) 方便月度聚合
+    if 'RTV Date' in df.columns:
+        df['RTV Month'] = df['RTV Date'].dt.to_period('M').astype(str)
+
+    # 数值字段转换
+    numeric_cols = ['QTY', 'UNIT COST', 'Total Cost', '10%运费', '总扣款']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # 逻辑计算补充：防止 Total Cost / 10%运费 / 总扣款 为空
+    if 'Total Cost' in df.columns and 'UNIT COST' in df.columns and 'QTY' in df.columns:
+        df['Total Cost'] = df.apply(lambda r: r['Total Cost'] if r['Total Cost'] > 0 else r['UNIT COST'] * r['QTY'], axis=1)
+    
+    if '10%运费' in df.columns and 'Total Cost' in df.columns:
+        df['10%运费'] = df.apply(lambda r: r['10%运费'] if r['10%运费'] > 0 else r['Total Cost'] * 0.1, axis=1)
+
+    if '总扣款' in df.columns and 'Total Cost' in df.columns and '10%运费' in df.columns:
+        df['总扣款'] = df.apply(lambda r: r['总扣款'] if r['总扣款'] > 0 else (r['Total Cost'] + r['10%运费']), axis=1)
+
+    return df
+
 # KPI 指标通用计算函数
 def calc_kpis(data_df):
     sales = data_df['Total Cost'].sum() if 'Total Cost' in data_df.columns else 0
@@ -58,13 +96,17 @@ def calc_kpis(data_df):
 # 3. 侧边栏：文件上传与全局筛选
 # =========================================================================
 st.sidebar.header("📁 数据导入")
-uploaded_file = st.sidebar.file_uploader("上传 CSV 或 Excel 销售数据表", type=["csv", "xlsx"])
+uploaded_sales_file = st.sidebar.file_uploader("1. 上传销售数据表 (CSV/Excel)", type=["csv", "xlsx"], key="sales_uploader")
+uploaded_return_file = st.sidebar.file_uploader("2. 上传退货数据表 (CSV/Excel)", type=["csv", "xlsx"], key="return_uploader")
 
-if uploaded_file is not None:
-    raw_df = load_data(uploaded_file)
+if uploaded_sales_file is not None:
+    raw_df = load_sales_data(uploaded_sales_file)
     
     # 过滤无效日期的行
     df = raw_df.dropna(subset=['Order Date']).copy() if 'Order Date' in raw_df.columns else raw_df.copy()
+
+    # 提取退货数据
+    rtv_df = load_return_data(uploaded_return_file) if uploaded_return_file is not None else None
 
     st.sidebar.subheader("🔍 全局维度筛选")
     
@@ -74,6 +116,8 @@ if uploaded_file is not None:
         selected_brand = st.sidebar.selectbox("选择品牌", brands)
         if selected_brand != '全部':
             df = df[df['品牌'] == selected_brand]
+            if rtv_df is not None and 'Brand' in rtv_df.columns:
+                rtv_df = rtv_df[rtv_df['Brand'] == selected_brand]
 
     # 运营筛选
     if '运营' in df.columns:
@@ -83,13 +127,14 @@ if uploaded_file is not None:
             df = df[df['运营'] == selected_operator]
 
     # =========================================================================
-    # 4. 看板 4 大主选项卡划分
+    # 4. 看板 5 大选项卡划分
     # =========================================================================
-    tab_total, tab_op, tab_sku_rank, tab_hd = st.tabs([
+    tab_total, tab_op, tab_sku_rank, tab_hd, tab_returns = st.tabs([
         "📊 1. 核心总销售看板 (含近7天/15天)", 
         "👤 2. 分运营销售数据看板", 
         "🏆 3. 产品 SKU 排名与等级划分",
-        "🏪 4. HD 门店 vs 个人地址占比"
+        "🏪 4. HD 门店 vs 个人地址占比",
+        "🔄 5. 退货与扣款月度分析"
     ])
 
     # -------------------------------------------------------------------------
@@ -436,6 +481,103 @@ if uploaded_file is not None:
                 )
         else:
             st.info("数据中未检索到 HD 门店订单或缺少州字段。")
+
+    # -------------------------------------------------------------------------
+    # TAB 5: 退货与扣款月度分析看板
+    # -------------------------------------------------------------------------
+    with tab_returns:
+        st.header("🔄 退货与扣款月度分析看板")
+        
+        if rtv_df is not None and not rtv_df.empty:
+            # 5.1 退货核心 KPI
+            total_rtv_qty = rtv_df['QTY'].sum()
+            total_rtv_cost = rtv_df['Total Cost'].sum()
+            total_shipping_fee = rtv_df['10%运费'].sum()
+            total_deduction = rtv_df['总扣款'].sum()
+
+            rk1, rk2, rk3, rk4 = st.columns(4)
+            rk1.metric("📦 累计退货件数", f"{int(total_rtv_qty):,} 件")
+            rk2.metric("💵 退货货值 (Total Cost)", f"${total_rtv_cost:,.2f}")
+            rk3.metric("🚚 10% 运费扣款", f"${total_shipping_fee:,.2f}")
+            rk4.metric("💥 累计总扣款 (Total Charge)", f"${total_deduction:,.2f}")
+
+            st.divider()
+
+            # 5.2 月度维度退货与扣款趋势
+            st.subheader("📅 月度退货金额与总扣款走势")
+            
+            rtv_monthly = rtv_df.groupby('RTV Month').agg(
+                退货数量=('QTY', 'sum'),
+                退货货值=('Total Cost', 'sum'),
+                运费扣款=('10%运费', 'sum'),
+                总扣款金额=('总扣款', 'sum'),
+                退货单数=('RTV Number', 'nunique')
+            ).reset_index().sort_values('RTV Month')
+
+            fig_rtv_month = px.bar(
+                rtv_monthly,
+                x='RTV Month',
+                y=['退货货值', '运费扣款'],
+                title="按月退货货值与 10% 运费构成",
+                labels={'RTV Month': '退货月份', 'value': '金额 ($)', 'variable': '费用类型'},
+                barmode='stack'
+            )
+            st.plotly_chart(fig_rtv_month, use_container_width=True)
+
+            st.divider()
+
+            # 5.3 退货原因与高退货 SKU 分析
+            c_rtv1, c_rtv2 = st.columns(2)
+            with c_rtv1:
+                st.subheader("⚠️ 退货原因 (Reason) 结构占比")
+                if 'Reason' in rtv_df.columns:
+                    reason_df = rtv_df.groupby('Reason').agg(
+                        扣款金额=('总扣款', 'sum'),
+                        退货件数=('QTY', 'sum')
+                    ).reset_index().sort_values('扣款金额', ascending=False)
+
+                    fig_reason = px.pie(
+                        reason_df, names='Reason', values='扣款金额',
+                        title="退货原因 - 总扣款占比", hole=0.4
+                    )
+                    st.plotly_chart(fig_reason, use_container_width=True)
+
+            with c_rtv2:
+                st.subheader("🚨 退货总扣款 TOP 10 SKU")
+                rtv_sku_col = '产品SKU' if '产品SKU' in rtv_df.columns else 'PART#'
+                if rtv_sku_col in rtv_df.columns:
+                    top_rtv_sku = rtv_df.groupby([rtv_sku_col]).agg(
+                        退货件数=('QTY', 'sum'),
+                        总扣款金额=('总扣款', 'sum')
+                    ).reset_index().sort_values('总扣款金额', ascending=False).head(10)
+
+                    fig_rtv_sku = px.bar(
+                        top_rtv_sku, x=rtv_sku_col, y='总扣款金额',
+                        color='退货件数', text_auto='.2s',
+                        title="高额扣款 SKU 排行"
+                    )
+                    st.plotly_chart(fig_rtv_sku, use_container_width=True)
+
+            st.divider()
+
+            # 5.4 月度退货明细数据表
+            st.subheader("📋 月度退货与扣款汇总表")
+            st.dataframe(
+                rtv_monthly,
+                column_config={
+                    "退货货值": st.column_config.NumberColumn("退货货值", format="$%.2f"),
+                    "运费扣款": st.column_config.NumberColumn("运费扣款", format="$%.2f"),
+                    "总扣款金额": st.column_config.NumberColumn("总扣款金额", format="$%.2f"),
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+
+            with st.expander("🔍 点击查看原始退货记录列表"):
+                st.dataframe(rtv_df, use_container_width=True)
+
+        else:
+            st.info("💡 请在左侧侧边栏上传退货数据表 (含有 RTV Date, RTV Number, Reason, 总扣款等表头) 以开启退货分析。")
 
 else:
     st.info("💡 请在左侧边栏上传 CSV 或 Excel 格式的销售数据表。")
