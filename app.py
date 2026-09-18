@@ -318,6 +318,42 @@ if uploaded_sales_file is not None:
             )
             st.plotly_chart(fig_trend, use_container_width=True)
 
+            # -----------------------------------------------------------------
+            # 需求二新增：各品类动销 SKU 数量分布
+            # -----------------------------------------------------------------
+            st.divider()
+            st.subheader("📦 各品类动销 SKU 数量分布统计")
+
+            sku_c = get_sku_col(df.columns)
+            name_c = '产品名称' if '产品名称' in df.columns else ('Description' if 'Description' in df.columns else sku_c)
+
+            if sku_c and name_c:
+                category_keywords = ['家用除湿机', '工业除湿机', '冷风机', '帐篷空调', '分体空调', '床垫']
+                cat_stats = []
+                
+                for kw in category_keywords:
+                    count = df[df[name_c].astype(str).str.contains(kw, case=False, na=False)][sku_c].nunique()
+                    cat_stats.append({'产品分类': kw, '动销 SKU 数量': count})
+                    
+                matched_mask = df[name_c].astype(str).str.contains('|'.join(category_keywords), case=False, na=False)
+                other_count = df[~matched_mask][sku_c].nunique()
+                if other_count > 0:
+                    cat_stats.append({'产品分类': '其他产品', '动销 SKU 数量': other_count})
+
+                cat_df = pd.DataFrame(cat_stats)
+                
+                c_cat1, c_cat2 = st.columns([3, 2])
+                with c_cat1:
+                    fig_cat = px.bar(
+                        cat_df, x='产品分类', y='动销 SKU 数量', 
+                        text='动销 SKU 数量', color='动销 SKU 数量', 
+                        color_continuous_scale='Blues',
+                        title="各品类动销 SKU 数量对比"
+                    )
+                    st.plotly_chart(fig_cat, use_container_width=True)
+                with c_cat2:
+                    st.dataframe(cat_df, use_container_width=True, hide_index=True)
+
     # -------------------------------------------------------------------------
     # TAB 2: 分运营销售数据看板
     # -------------------------------------------------------------------------
@@ -389,6 +425,11 @@ if uploaded_sales_file is not None:
             sku_rank_df['日均销量(件/天)'] = (sku_rank_df['总销量'] / total_days_range).round(2)
             sku_rank_df = sku_rank_df.sort_values(by='总销售额', ascending=False).reset_index(drop=True)
 
+            # -----------------------------------------------------------------
+            # 需求三新增：加入产品排名序号
+            # -----------------------------------------------------------------
+            sku_rank_df.insert(0, '排名序号', range(1, len(sku_rank_df) + 1))
+
             total_sku_sales = sku_rank_df['总销售额'].sum()
             sku_rank_df['销售额占比'] = (sku_rank_df['总销售额'] / total_sku_sales) if total_sku_sales > 0 else 0
             sku_rank_df['累计销售额占比'] = sku_rank_df['销售额占比'].cumsum()
@@ -406,6 +447,7 @@ if uploaded_sales_file is not None:
             st.dataframe(
                 sku_rank_df,
                 column_config={
+                    "排名序号": st.column_config.NumberColumn("排名序号", format="%d"),
                     "总销售额": st.column_config.NumberColumn("总销售额", format="$%.2f"),
                     "日均销量(件/天)": st.column_config.NumberColumn("日均销量(件/天)", format="%.2f"),
                     "销售额占比": st.column_config.NumberColumn("销售额占比", format="%.2f%%"),
@@ -472,6 +514,18 @@ if uploaded_sales_file is not None:
 
                 st.divider()
 
+                # -------------------------------------------------------------
+                # 需求一新增：Tab 5 全局 SKU 专属筛选入口
+                # -------------------------------------------------------------
+                st.markdown("### 🔍 退货分析 SKU 专属筛选")
+                unique_rtv_skus = sorted(rtv_df[rtv_sku_col].dropna().astype(str).unique())
+                selected_rtv_skus = st.multiselect(
+                    "选择要分析的特定产品 SKU (支持多选与搜索，留空则匹配全部 SKU):",
+                    options=unique_rtv_skus,
+                    default=[]
+                )
+                st.divider()
+
                 # 子功能选项卡划分
                 sub_tab_rank, sub_tab_reason, sub_tab_order, sub_tab_rtv = st.tabs([
                     "🏆 SKU 退货率排行榜", 
@@ -489,6 +543,9 @@ if uploaded_sales_file is not None:
                     rank_summary = build_rtv_analysis_table(
                         rtv_df, match_source_df, rtv_sku_col, sales_sku_col, date_type='Order', granularity='Overall'
                     )
+
+                    if selected_rtv_skus:
+                        rank_summary = rank_summary[rank_summary[rtv_sku_col].astype(str).isin(selected_rtv_skus)]
 
                     min_sales_limit = st.slider("过滤低销量 SKU (设置最小出货量门槛):", min_value=0, max_value=500, value=10)
                     filtered_rank_df = rank_summary[rank_summary['总出货销量'] >= min_sales_limit]
@@ -546,6 +603,9 @@ if uploaded_sales_file is not None:
                         st.warning("⚠️ 在退货数据表中未找到退货原因列（如：'退货原因', 'Return Reason', 'Reason', '备注'）。")
                     else:
                         rtv_df_reason = rtv_df.copy()
+                        if selected_rtv_skus:
+                            rtv_df_reason = rtv_df_reason[rtv_df_reason[rtv_sku_col].astype(str).isin(selected_rtv_skus)]
+
                         rtv_df_reason[rtv_reason_col] = rtv_df_reason[rtv_reason_col].fillna("未注明原因")
 
                         r_col1, r_col2 = st.columns([2, 3])
@@ -605,6 +665,10 @@ if uploaded_sales_file is not None:
                         rtv_df, match_source_df, rtv_sku_col, sales_sku_col, date_type='Order', granularity=gran_ord
                     )
 
+                    # 应用 SKU 筛选
+                    if selected_rtv_skus:
+                        order_rtv_summary = order_rtv_summary[order_rtv_summary[rtv_sku_col].astype(str).isin(selected_rtv_skus)]
+
                     st.dataframe(
                         order_rtv_summary,
                         column_config={
@@ -629,6 +693,10 @@ if uploaded_sales_file is not None:
                     rtv_date_summary = build_rtv_analysis_table(
                         rtv_df, match_source_df, rtv_sku_col, sales_sku_col, date_type='RTV', granularity=gran_rtv
                     )
+
+                    # 应用 SKU 筛选
+                    if selected_rtv_skus:
+                        rtv_date_summary = rtv_date_summary[rtv_date_summary[rtv_sku_col].astype(str).isin(selected_rtv_skus)]
 
                     st.dataframe(
                         rtv_date_summary,
