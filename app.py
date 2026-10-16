@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import timedelta
+import calendar
 
 # =========================================================================
 # 1. 页面基本配置
@@ -202,12 +203,13 @@ if uploaded_sales_file is not None:
     # =========================================================================
     # 4. 看板 5 大选项卡划分
     # =========================================================================
-    tab_total, tab_op, tab_sku_rank, tab_hd, tab_returns = st.tabs([
-        "📊 1. 核心总销售与动销看板", 
-        "👤 2. 分运营销售数据看板", 
-        "🏆 3. 产品 SKU 排名与动销分析",
-        "🏪 4. HD 门店 vs 个人地址占比",
-        "🔄 5. 退货与扣款 (综合诊断)"
+    tab_total, tab_month, tab_op, tab_sku_rank, tab_hd, tab_returns = st.tabs([
+        "📊 1. 核心总销售与动销看板",
+        "📅 2. 各月份销售数据对比", 
+        "👤 3. 分运营销售数据看板", 
+        "🏆 4. 产品 SKU 排名与动销分析",
+        "🏪 5. HD 门店 vs 个人地址占比",
+        "🔄 6. 退货与扣款 (综合诊断)"
     ])
 
     # -------------------------------------------------------------------------
@@ -353,6 +355,118 @@ if uploaded_sales_file is not None:
                     st.plotly_chart(fig_cat, use_container_width=True)
                 with c_cat2:
                     st.dataframe(cat_df, use_container_width=True, hide_index=True)
+
+    # -------------------------------------------------------------------------
+    # TAB 2: 各月份销售数据对比（全量月份，无需月份筛选）
+    # -------------------------------------------------------------------------
+    with tab_month:
+        st.header("📅 各月份销售数据对比看板")
+        st.caption("按 Order Date 的自然月汇总；受左侧品牌、运营筛选影响。销售额采用 Total Cost（原脚本口径）。")
+
+        if 'Order Date' not in df.columns or df.empty:
+            st.warning("缺少有效的 Order Date 数据，无法生成月度看板。")
+        else:
+            month_df = df.dropna(subset=['Order Date']).copy()
+            month_df['月份'] = month_df['Order Date'].dt.strftime('%Y-%m')
+            month_df['日期'] = month_df['Order Date'].dt.normalize()
+            month_df['Total Cost'] = pd.to_numeric(month_df['Total Cost'], errors='coerce').fillna(0)
+            month_df['Quantity'] = pd.to_numeric(month_df['Quantity'], errors='coerce').fillna(0)
+            if 'PO Number' in month_df.columns:
+                monthly = month_df.groupby('月份').agg(
+                    销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum'),
+                    订单量=('PO Number', 'nunique'), 有订单天数=('日期', 'nunique')
+                ).reset_index()
+            else:
+                monthly = month_df.groupby('月份').agg(
+                    销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum'),
+                    订单量=('Quantity', 'size'), 有订单天数=('日期', 'nunique')
+                ).reset_index()
+
+            # 补齐数据范围内缺失的自然月，确保环比对应真实上个月
+            all_months = pd.period_range(month_df['Order Date'].min().to_period('M'),
+                                         month_df['Order Date'].max().to_period('M'), freq='M').astype(str)
+            monthly = monthly.set_index('月份').reindex(all_months, fill_value=0).rename_axis('月份').reset_index()
+            monthly['客单价'] = (monthly['销售额'] / monthly['订单量'].replace(0, float('nan'))).fillna(0)
+            monthly['自然月天数'] = monthly['月份'].apply(lambda m: calendar.monthrange(int(m[:4]), int(m[5:]))[1])
+            monthly['日均销售额'] = monthly['销售额'] / monthly['自然月天数']
+            monthly['日均销量'] = monthly['销量'] / monthly['自然月天数']
+            monthly['销售额环比(%)'] = monthly['销售额'].pct_change(fill_method=None).replace([float('inf'), -float('inf')], float('nan')) * 100
+            monthly['销量环比(%)'] = monthly['销量'].pct_change(fill_method=None).replace([float('inf'), -float('inf')], float('nan')) * 100
+            monthly['订单量环比(%)'] = monthly['订单量'].pct_change(fill_method=None).replace([float('inf'), -float('inf')], float('nan')) * 100
+            monthly['月份状态'] = '完整自然月'
+            first_m = month_df['Order Date'].min().to_period('M')
+            last_m = month_df['Order Date'].max().to_period('M')
+            if month_df['Order Date'].min().day != 1:
+                monthly.loc[monthly['月份'] == str(first_m), '月份状态'] = '起始月可能不完整'
+            if month_df['Order Date'].max().day < month_df['Order Date'].max().days_in_month:
+                monthly.loc[monthly['月份'] == str(last_m), '月份状态'] = '末月可能不完整'
+            st.info("月度日均指标按自然月天数计算；首末月可能只有部分数据。环比不做缺失月份插值，前月为 0 时显示为空。")
+
+            latest = monthly.iloc[-1]
+            previous = monthly.iloc[-2] if len(monthly) > 1 else None
+            def month_delta(value):
+                return f"{value:+.1f}%" if pd.notna(value) else None
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(f"{latest['月份']} 销售额", f"${latest['销售额']:,.2f}", month_delta(latest['销售额环比(%)']))
+            k2.metric("当月销量", f"{latest['销量']:,.0f}", month_delta(latest['销量环比(%)']))
+            k3.metric("当月订单量", f"{latest['订单量']:,.0f}", month_delta(latest['订单量环比(%)']))
+            k4.metric("当月客单价", f"${latest['客单价']:,.2f}")
+            st.caption(f"最新月份状态：{latest['月份状态']}；上述环比为整月累计数据对比，非同期进度对比。")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(px.bar(monthly, x='月份', y='销售额', text_auto='.3s', title='各月销售额对比'), use_container_width=True)
+            with c2:
+                st.plotly_chart(px.bar(monthly, x='月份', y='销量', text_auto='.3s', title='各月销量对比'), use_container_width=True)
+            c3, c4 = st.columns(2)
+            with c3:
+                st.plotly_chart(px.line(monthly, x='月份', y='销售额', markers=True, title='月度销售额趋势'), use_container_width=True)
+            with c4:
+                st.plotly_chart(px.bar(monthly, x='月份', y='销售额环比(%)', title='月度销售额环比增长率 (%)'), use_container_width=True)
+
+            st.subheader('📋 各月份完整 KPI 对比')
+            st.dataframe(monthly, use_container_width=True, hide_index=True,
+                         column_config={
+                             '销售额': st.column_config.NumberColumn(format='$%.2f'),
+                             '客单价': st.column_config.NumberColumn(format='$%.2f'),
+                             '日均销售额': st.column_config.NumberColumn(format='$%.2f'),
+                             '日均销量': st.column_config.NumberColumn(format='%.2f'),
+                             '销售额环比(%)': st.column_config.NumberColumn(format='%.1f%%'),
+                             '销量环比(%)': st.column_config.NumberColumn(format='%.1f%%'),
+                             '订单量环比(%)': st.column_config.NumberColumn(format='%.1f%%')})
+
+            if '运营' in month_df.columns:
+                st.subheader('👤 运营人员各月对比')
+                op_month = month_df.groupby(['月份', '运营'], dropna=False).agg(
+                    销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum')).reset_index()
+                metric_op = st.radio('运营对比指标', ['销售额', '销量'], horizontal=True, key='monthly_op_metric')
+                st.plotly_chart(px.bar(op_month, x='月份', y=metric_op, color='运营', barmode='group',
+                                       title=f'各运营人员月度{metric_op}'), use_container_width=True)
+                st.dataframe(op_month.pivot_table(index='运营', columns='月份', values=metric_op, aggfunc='sum', fill_value=0),
+                             use_container_width=True)
+
+            sku_month_col = get_sku_col(month_df.columns)
+            if sku_month_col:
+                st.subheader('🏆 SKU 各月销售对比')
+                sku_month = month_df.groupby(['月份', sku_month_col], dropna=False).agg(
+                    销售额=('Total Cost', 'sum'), 销量=('Quantity', 'sum')).reset_index()
+                top_skus = sku_month.groupby(sku_month_col)['销售额'].sum().nlargest(10).index.tolist()
+                selected_skus = st.multiselect('选择 SKU（默认销售额 TOP 10）',
+                                               options=sku_month[sku_month_col].dropna().unique().tolist(),
+                                               default=top_skus, key='monthly_sku_selection')
+                metric_sku = st.radio('SKU 对比指标', ['销售额', '销量'], horizontal=True, key='monthly_sku_metric')
+                if selected_skus:
+                    chosen = sku_month[sku_month[sku_month_col].isin(selected_skus)]
+                    st.plotly_chart(px.line(chosen, x='月份', y=metric_sku, color=sku_month_col,
+                                            markers=True, title=f'各 SKU 月度{metric_sku}趋势'), use_container_width=True)
+                    st.dataframe(chosen.pivot_table(index=sku_month_col, columns='月份', values=metric_sku,
+                                                    aggfunc='sum', fill_value=0), use_container_width=True)
+                else:
+                    st.info('请选择至少一个 SKU。')
+
+            st.download_button('⬇️ 导出月度 KPI 对比 CSV',
+                               data=monthly.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='monthly_sales_comparison.csv', mime='text/csv')
 
     # -------------------------------------------------------------------------
     # TAB 2: 分运营销售数据看板
